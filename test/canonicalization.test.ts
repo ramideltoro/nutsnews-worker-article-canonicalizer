@@ -1,7 +1,12 @@
 import {
   createBufferedRuntimeTelemetrySink,
+  type BrokerPublishCommand,
   type RuntimeMessageContext
 } from "@ramideltoro/nutsnews-worker-runtime";
+import {
+  STAGE_PAYLOAD_SCHEMA_IDS,
+  STAGE_PAYLOAD_SCHEMA_VERSION
+} from "@ramideltoro/nutsnews-worker-contracts";
 import {
   describe,
   expect,
@@ -23,6 +28,7 @@ import {
 } from "../src/test-doubles.js";
 
 import type {
+  CanonicalEnrichmentRequest,
   CanonicalInvalidDecision,
   CanonicalResolutionDecision,
   CanonicalizerWorkTools
@@ -35,7 +41,9 @@ describe("createCanonicalizationWorkHandler", () => {
     await context.service.start();
 
     try {
-      await expect(context.broker.deliverCanonicalization(articleDelivery(1))).resolves.toMatchObject({
+      const delivery = articleDelivery(1);
+
+      await expect(context.broker.deliverCanonicalization(delivery)).resolves.toMatchObject({
         action: "ack",
         reason: "handled"
       });
@@ -60,7 +68,46 @@ describe("createCanonicalizationWorkHandler", () => {
         canonicalUrl: "https://articles.example.test/world/story-one",
         reason: "new"
       });
-      expect(context.broker.published).toHaveLength(0);
+      expect(context.broker.published).toHaveLength(1);
+      expect(context.outbox.records).toHaveLength(1);
+
+      const command = publishedCommand(context, 0);
+      const request = pendingEnrichmentRequest(context, 0);
+      const expectedIdempotencyKey = `canonicalizer:enrichment:${request.requestId}`;
+
+      expect(command.payload).toMatchObject({
+        schemaId: STAGE_PAYLOAD_SCHEMA_IDS.enrichmentRequest,
+        schemaVersion: STAGE_PAYLOAD_SCHEMA_VERSION,
+        pipelineRunId: "018f1598-2dd5-7c4f-9f92-8f7a7f8b3601",
+        sourceMessageId: uuid(1_001),
+        idempotencyKey: expectedIdempotencyKey,
+        requestId: request.requestId,
+        canonicalArticleId: decision.canonicalArticleId,
+        articleVersion: 1,
+        candidateId: "candidate-1",
+        canonicalUrl: "https://articles.example.test/world/story-one",
+        reason: "new"
+      });
+      expect(command.envelope).toMatchObject({
+        route: "enrichment",
+        causationId: uuid(1_001),
+        correlationId: uuid(3_001),
+        idempotencyKey: expectedIdempotencyKey,
+        aggregate: {
+          type: "article",
+          id: decision.canonicalArticleId,
+          version: 1
+        },
+        producer: {
+          name: "nutsnews-worker-article-canonicalizer"
+        },
+        payloadRef: {
+          kind: "backend-record",
+          mediaType: "application/json"
+        }
+      });
+      expect(command.envelope.payloadRef.sizeBytes).toBeGreaterThan(0);
+      expect(context.outbox.records[0]?.command).toBe(command);
     } finally {
       await context.service.stop();
     }
@@ -100,6 +147,7 @@ describe("createCanonicalizationWorkHandler", () => {
         "material-fingerprint-match"
       ]);
       expect(context.outbox.pendingEnrichment).toHaveLength(1);
+      expect(context.broker.published).toHaveLength(1);
     } finally {
       await context.service.stop();
     }
@@ -138,6 +186,7 @@ describe("createCanonicalizationWorkHandler", () => {
         publishEnrichment: false
       });
       expect(context.outbox.pendingEnrichment).toHaveLength(1);
+      expect(context.broker.published).toHaveLength(1);
     } finally {
       await context.service.stop();
     }
@@ -182,6 +231,12 @@ describe("createCanonicalizationWorkHandler", () => {
         articleVersion: 2,
         reason: "changed"
       });
+      expect(context.broker.published).toHaveLength(2);
+      expect(publishedCommand(context, 1).payload).toMatchObject({
+        canonicalArticleId: first.canonicalArticleId,
+        articleVersion: 2,
+        reason: "changed"
+      });
     } finally {
       await context.service.stop();
     }
@@ -221,6 +276,7 @@ describe("createCanonicalizationWorkHandler", () => {
         "source-guid-url-conflict"
       ]);
       expect(context.outbox.pendingEnrichment).toHaveLength(2);
+      expect(context.broker.published).toHaveLength(2);
     } finally {
       await context.service.stop();
     }
@@ -254,6 +310,7 @@ describe("createCanonicalizationWorkHandler", () => {
         "candidate-replay"
       ]);
       expect(context.outbox.pendingEnrichment).toHaveLength(1);
+      expect(context.broker.published).toHaveLength(1);
     } finally {
       await context.service.stop();
     }
@@ -390,6 +447,26 @@ function localTransactionRunner(dependencies: ReturnType<typeof createLocalCanon
 
 function localBrokerOutbox(dependencies: ReturnType<typeof createLocalCanonicalizerDependencies>): LocalCanonicalBrokerOutbox {
   return dependencies.brokerOutbox as LocalCanonicalBrokerOutbox;
+}
+
+function publishedCommand(context: ReturnType<typeof createCanonicalizationContext>, index: number): BrokerPublishCommand {
+  const command = context.broker.published[index];
+
+  if (command === undefined) {
+    throw new Error(`Expected published command at index ${String(index)}.`);
+  }
+
+  return command;
+}
+
+function pendingEnrichmentRequest(context: ReturnType<typeof createCanonicalizationContext>, index: number): CanonicalEnrichmentRequest {
+  const record = context.outbox.pendingEnrichment[index];
+
+  if (record === undefined) {
+    throw new Error(`Expected pending enrichment request at index ${String(index)}.`);
+  }
+
+  return record.request;
 }
 
 function uuid(counter: number): string {

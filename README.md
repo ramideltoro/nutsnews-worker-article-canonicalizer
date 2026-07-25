@@ -6,7 +6,7 @@ Deployable worker-uplift article canonicalizer service shell for NutsNews.
 
 Own the canonicalizer service boundary that consumes contracted canonicalization candidate messages, reserves state for canonical article identity and dedupe decisions, and publishes only canonicalization-owned downstream events in shadow mode.
 
-The service now performs deterministic URL normalization, canonical identity resolution, alias tracking, material-change versioning, and pending enrichment outbox recording. Broker publication of the canonicalizer-to-enrichment request is intentionally held until the contracts package adds a dedicated enrichment request payload schema.
+The service performs deterministic URL normalization, canonical identity resolution, alias tracking, material-change versioning, pending enrichment outbox recording, and contract-backed canonicalizer-to-enrichment request publication.
 
 ## Owner
 
@@ -28,7 +28,7 @@ The image runs as a non-root user, exposes port `8080`, and serves:
 
 The service consumes exact immutable worker-uplift package versions:
 
-- `@ramideltoro/nutsnews-worker-contracts@0.3.1`
+- `@ramideltoro/nutsnews-worker-contracts@0.4.0`
 - `@ramideltoro/nutsnews-worker-runtime@0.4.0`
 
 Local and CI installs use the owner-scoped GitHub Packages npm registry. No package token value is committed.
@@ -60,9 +60,10 @@ The canonicalizer handler:
 - records `new`, `duplicate`, `alias`, `changed`, `ambiguous`, and `invalid` decisions with safe reasons;
 - records candidate-to-article aliases and source GUID aliases in the canonical state model;
 - versions material changes using safe feed metadata;
-- records pending enrichment requests in the same transaction callback as the identity decision.
+- records pending enrichment requests in the same transaction callback as the identity decision;
+- publishes one contracted `enrichmentRequest` payload for each `new` or `changed` decision after the transaction commits.
 
-Pending enrichment requests are stored as outbox intent only. The current `@ramideltoro/nutsnews-worker-contracts@0.3.1` package does not expose a broker-valid canonicalizer-to-enrichment request payload; follow-up contracts work is tracked in `ramideltoro/nutsnews-worker-contracts#16`.
+Duplicate, alias, ambiguous, invalid, and runtime replay decisions do not publish enrichment work. The publish path uses `@ramideltoro/nutsnews-worker-contracts@0.4.0` and records the broker receipt in the local outbox interface.
 
 Concurrency, replay, crash-point, and ambiguity proof notes live in `docs/replay-proof.md`.
 

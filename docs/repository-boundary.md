@@ -4,7 +4,7 @@
 | --- | --- |
 | Repository | `ramideltoro/nutsnews-worker-article-canonicalizer` |
 | Owner | `@ramideltoro` |
-| Responsibility | Consume article candidate jobs, resolve canonical article identity, deduplicate candidates, and publish approval jobs only for new or changed articles. |
+| Responsibility | Consume article candidate jobs, resolve canonical article identity, deduplicate candidates, and publish enrichment requests only for new or changed articles. |
 | Deployable / package type | Deployable service repo. Publishes immutable SHA-tagged images to `ghcr.io/ramideltoro/nutsnews-worker-article-canonicalizer`. |
 | Primary artifact | Signed GHCR image tagged only by commit SHA |
 | Support boundary | Repo-local code, tests, CI, package/image publishing, and service-local run notes. |

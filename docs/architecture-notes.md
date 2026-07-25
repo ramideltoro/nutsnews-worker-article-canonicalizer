@@ -2,11 +2,11 @@
 
 ## Scope
 
-The article canonicalizer owns the worker-uplift service boundary that consumes `canonicalArticleCandidate` messages on the contracted `canonicalization` route. It normalizes article identity inputs, resolves canonical article IDs, records duplicate and alias decisions, versions material changes, and stores pending enrichment outbox intent.
+The article canonicalizer owns the worker-uplift service boundary that consumes `canonicalArticleCandidate` messages on the contracted `canonicalization` route. It normalizes article identity inputs, resolves canonical article IDs, records duplicate and alias decisions, versions material changes, stores pending enrichment outbox intent, and publishes contracted `enrichmentRequest` messages.
 
 ## Runtime Surfaces
 
-- Contracts: `@ramideltoro/nutsnews-worker-contracts@0.3.1`
+- Contracts: `@ramideltoro/nutsnews-worker-contracts@0.4.0`
 - Runtime: `@ramideltoro/nutsnews-worker-runtime@0.4.0`
 - Input route boundary: `getWorkerRoute("canonicalization")`
 - Downstream publish route boundary: `getWorkerRoute("enrichment")`
@@ -38,15 +38,13 @@ Identity resolution uses safe canonicalization payload fields only.
 5. Use feed title and publication time in the material fingerprint so meaningful feed metadata changes create a new article version without losing the canonical article history.
 6. Record conflicts between a known source GUID alias and a different known normalized URL alias as `ambiguous`.
 
-The state model records candidate decisions and aliases so replayed candidate IDs return `duplicate` without scheduling additional enrichment work. New and changed decisions record one pending enrichment outbox item inside the same transaction callback as the identity decision.
+The state model records candidate decisions and aliases so replayed candidate IDs return `duplicate` without scheduling additional enrichment work. New and changed decisions record one pending enrichment outbox item inside the same transaction callback as the identity decision, then publish one broker-confirmed `enrichmentRequest` command after the transaction commits.
 
 Local transaction doubles serialize transaction callbacks and stage state/outbox commit operations until the callback succeeds. This keeps race and crash tests aligned with the intended production database invariant: canonical identity state and pending enrichment outbox intent commit together or not at all.
 
-## Contracts Gap
+## Enrichment Request Contract
 
-The current contracts package exposes `canonicalArticleCandidate` on the `canonicalization` stage and `enrichmentResult` on the `enrichment` stage. It does not expose a canonicalizer-to-enrichment request payload schema.
-
-Until `ramideltoro/nutsnews-worker-contracts#16` adds that request contract, this repository records a typed pending enrichment request but does not publish a broker message that downstream enrichment consumers would reject as a stage or payload mismatch.
+The contracts package exposes `enrichmentRequest` as the canonicalizer-to-enrichment payload schema on the `enrichment` stage. The payload carries canonical article identity, version, candidate ID, normalized canonical URL, request reason, and a durable backend record reference. It does not carry article page bodies.
 
 ## Dependency Interfaces
 

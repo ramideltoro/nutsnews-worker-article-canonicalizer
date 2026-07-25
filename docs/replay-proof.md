@@ -37,7 +37,7 @@ The reliability suite covers retry behavior around these crash points:
 - before pending outbox insert, proving staged canonical state is rolled back;
 - after pending outbox insert and before ack, proving replay does not create duplicate enrichment work.
 
-The broker publish-confirm path is intentionally not exercised because `@ramideltoro/nutsnews-worker-contracts@0.3.1` does not yet expose a canonicalizer-to-enrichment request payload. Until `ramideltoro/nutsnews-worker-contracts#16` lands, the service records pending outbox intent and keeps `broker.published` empty.
+The broker publish-confirm path is exercised with `@ramideltoro/nutsnews-worker-contracts@0.4.0`. New and changed decisions publish one contracted `enrichmentRequest` command after the transaction commits, record the publish receipt in the outbox interface, and replay as duplicate without publishing a second command.
 
 ## Ambiguity Review
 

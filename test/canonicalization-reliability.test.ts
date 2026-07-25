@@ -65,6 +65,7 @@ describe("canonicalization reliability proof", () => {
       expect(decisionCount(decisions, "duplicate")).toBe(1);
       expect(new Set(decisions.map((decision) => decision.canonicalArticleId)).size).toBe(1);
       expect(context.outbox.pendingEnrichment).toHaveLength(1);
+      expect(context.broker.published).toHaveLength(1);
     } finally {
       await context.service.stop();
     }
@@ -114,6 +115,7 @@ describe("canonicalization reliability proof", () => {
         "source-guid-url-conflict"
       ]);
       expect(context.outbox.pendingEnrichment).toHaveLength(3);
+      expect(context.broker.published).toHaveLength(3);
     } finally {
       await context.service.stop();
     }
@@ -137,6 +139,7 @@ describe("canonicalization reliability proof", () => {
       await expect(context.broker.deliverCanonicalization(delivery)).rejects.toThrow("crash-before-inbox-insert");
       expect(context.stateStore.decisions).toHaveLength(0);
       expect(context.outbox.pendingEnrichment).toHaveLength(0);
+      expect(context.broker.published).toHaveLength(0);
 
       await expect(context.broker.deliverCanonicalization(delivery)).resolves.toMatchObject({
         action: "ack",
@@ -146,6 +149,7 @@ describe("canonicalization reliability proof", () => {
         "new"
       ]);
       expect(context.outbox.pendingEnrichment).toHaveLength(1);
+      expect(context.broker.published).toHaveLength(1);
     } finally {
       await context.service.stop();
     }
@@ -172,6 +176,7 @@ describe("canonicalization reliability proof", () => {
       });
       expect(context.stateStore.decisions).toHaveLength(0);
       expect(context.outbox.pendingEnrichment).toHaveLength(0);
+      expect(context.broker.published).toHaveLength(0);
 
       await expect(context.broker.deliverCanonicalization(delivery)).resolves.toMatchObject({
         action: "ack",
@@ -181,6 +186,7 @@ describe("canonicalization reliability proof", () => {
         "new"
       ]);
       expect(context.outbox.pendingEnrichment).toHaveLength(1);
+      expect(context.broker.published).toHaveLength(1);
     } finally {
       await context.service.stop();
     }
@@ -205,6 +211,7 @@ describe("canonicalization reliability proof", () => {
       });
       expect(context.stateStore.decisions).toHaveLength(0);
       expect(context.outbox.pendingEnrichment).toHaveLength(0);
+      expect(context.broker.published).toHaveLength(0);
 
       await expect(context.broker.deliverCanonicalization(delivery)).resolves.toMatchObject({
         action: "ack",
@@ -214,6 +221,7 @@ describe("canonicalization reliability proof", () => {
         "new"
       ]);
       expect(context.outbox.pendingEnrichment).toHaveLength(1);
+      expect(context.broker.published).toHaveLength(1);
     } finally {
       await context.service.stop();
     }
@@ -242,6 +250,8 @@ describe("canonicalization reliability proof", () => {
         "new"
       ]);
       expect(context.outbox.pendingEnrichment).toHaveLength(1);
+      expect(context.broker.published).toHaveLength(1);
+      expect(context.outbox.records).toHaveLength(1);
 
       await expect(context.broker.deliverCanonicalization(delivery)).resolves.toMatchObject({
         action: "ack",
@@ -255,7 +265,8 @@ describe("canonicalization reliability proof", () => {
         "candidate-replay"
       ]);
       expect(context.outbox.pendingEnrichment).toHaveLength(1);
-      expect(context.broker.published).toHaveLength(0);
+      expect(context.broker.published).toHaveLength(1);
+      expect(context.outbox.records).toHaveLength(1);
     } finally {
       await context.service.stop();
     }
@@ -305,6 +316,7 @@ describe("canonicalization reliability proof", () => {
           ]
         }
       ]);
+      expect(context.broker.published).toHaveLength(3);
     } finally {
       await context.service.stop();
     }

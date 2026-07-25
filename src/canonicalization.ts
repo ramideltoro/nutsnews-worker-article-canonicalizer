@@ -1,6 +1,16 @@
 import {
+  STAGE_PAYLOAD_SCHEMA_IDS,
+  STAGE_PAYLOAD_SCHEMA_VERSION,
+  WORKER_DELIVERY_BEHAVIOR,
+  assertWorkerEnvelope,
+  getStagePayloadSizeBytes,
+  getWorkerRoute,
+  validateStagePayload
+} from "@ramideltoro/nutsnews-worker-contracts";
+import {
   emitRuntimeTelemetry,
   runtimeNow,
+  type BrokerPublishCommand,
   type RuntimeMessageContext,
   type RuntimeTelemetrySink
 } from "@ramideltoro/nutsnews-worker-runtime";
@@ -17,7 +27,8 @@ import type {
 } from "./dependencies.js";
 import {
   sha256Hex,
-  stableEnrichmentRequestId
+  stableEnrichmentRequestId,
+  stableUuid
 } from "./ids.js";
 import { normalizeArticleUrl } from "./url-normalization.js";
 
@@ -74,17 +85,26 @@ async function handleCanonicalization(
     identitySeed: normalized.value.url,
     decidedAt
   } satisfies CanonicalCandidateInput;
+  let enrichmentRequestToPublish: CanonicalEnrichmentRequest | undefined;
   const decision = await tools.withTransaction(async (transaction) => {
     const resolved = await options.dependencies.stateStore.resolveCandidate(input, transaction);
 
-    if (isEnrichmentDecision(resolved)) {
+    if (shouldPublishEnrichment(resolved)) {
       const request = enrichmentRequest(input, resolved, options.config);
 
       await tools.recordPendingEnrichment(request, transaction);
+      enrichmentRequestToPublish = request;
     }
 
     return resolved;
   });
+
+  if (enrichmentRequestToPublish !== undefined) {
+    const command = enrichmentPublishCommand(context, enrichmentRequestToPublish);
+    const receipt = await tools.publish(command);
+
+    await tools.recordOutbox(command, receipt);
+  }
 
   await emitDecisionTelemetry(options, candidate, decision.decision, decision.reasons, decidedAt, {
     canonicalArticleId: decision.canonicalArticleId,
@@ -132,6 +152,12 @@ function isEnrichmentDecision(
   return decision.decision === "new" || decision.decision === "changed";
 }
 
+function shouldPublishEnrichment(
+  decision: CanonicalResolutionDecision
+): decision is CanonicalResolutionDecision & { readonly decision: "new" | "changed" } {
+  return decision.publishEnrichment && isEnrichmentDecision(decision);
+}
+
 function enrichmentRequest(
   input: CanonicalCandidateInput,
   decision: CanonicalResolutionDecision & { readonly decision: "new" | "changed" },
@@ -160,6 +186,86 @@ function enrichmentRequest(
       uri: `backend://worker-uplift/canonicalizer/${encodeURIComponent(decision.canonicalArticleId)}/${encodeURIComponent(requestId)}`,
       mediaType: "application/json"
     }
+  };
+}
+
+function enrichmentPublishCommand(
+  context: RuntimeMessageContext,
+  request: CanonicalEnrichmentRequest
+): BrokerPublishCommand {
+  const route = getWorkerRoute("enrichment");
+  const idempotencyKey = `canonicalizer:enrichment:${request.requestId}`;
+  const payload = enrichmentPublishPayload(context, request, idempotencyKey);
+  const validation = validateStagePayload(payload);
+
+  if (!validation.ok) {
+    throw new Error(`Invalid enrichment request payload: ${validation.issues.map((issue) => `${issue.path}:${issue.code}`).join(", ")}`);
+  }
+
+  return {
+    envelope: assertWorkerEnvelope({
+      schemaId: route.schemaId,
+      schemaVersion: 1,
+      route: "enrichment",
+      messageId: stableUuid([
+        "enrichment-message",
+        request.requestId
+      ]),
+      causationId: context.envelope.messageId,
+      correlationId: context.envelope.correlationId,
+      traceparent: context.envelope.traceparent,
+      ...(context.envelope.tracestate === undefined ? {} : {
+        tracestate: context.envelope.tracestate
+      }),
+      idempotencyKey,
+      aggregate: {
+        type: "article",
+        id: request.canonicalArticleId,
+        version: request.articleVersion
+      },
+      occurredAt: request.producedAt,
+      attempt: {
+        count: 1,
+        max: WORKER_DELIVERY_BEHAVIOR.maxAttempts,
+        firstAttemptAt: request.producedAt
+      },
+      producer: request.producer,
+      payloadRef: {
+        ...request.payloadRef,
+        sizeBytes: getStagePayloadSizeBytes(payload)
+      }
+    }),
+    payload
+  };
+}
+
+function enrichmentPublishPayload(
+  context: RuntimeMessageContext,
+  request: CanonicalEnrichmentRequest,
+  idempotencyKey: string
+): Readonly<Record<string, unknown>> {
+  return {
+    schemaId: STAGE_PAYLOAD_SCHEMA_IDS.enrichmentRequest,
+    schemaVersion: STAGE_PAYLOAD_SCHEMA_VERSION,
+    pipelineRunId: stringValue(context.payload.pipelineRunId, "pipelineRunId"),
+    stageExecutionId: stableUuid([
+      "enrichment-stage-execution",
+      request.requestId
+    ]),
+    sourceMessageId: context.envelope.messageId,
+    idempotencyKey,
+    traceparent: context.envelope.traceparent,
+    ...(context.envelope.tracestate === undefined ? {} : {
+      tracestate: context.envelope.tracestate
+    }),
+    producedAt: request.producedAt,
+    requestId: request.requestId,
+    canonicalArticleId: request.canonicalArticleId,
+    articleVersion: request.articleVersion,
+    candidateId: request.candidateId,
+    canonicalUrl: request.canonicalUrl,
+    reason: request.reason,
+    payloadRef: request.payloadRef
   };
 }
 
