@@ -6,7 +6,7 @@ Deployable worker-uplift article canonicalizer service shell for NutsNews.
 
 Own the canonicalizer service boundary that consumes contracted canonicalization candidate messages, reserves state for canonical article identity and dedupe decisions, and publishes only canonicalization-owned downstream events in shadow mode.
 
-Issue #98 bootstraps the deployable shell. Later canonicalizer issues add identity normalization and dedupe business logic.
+The service now performs deterministic URL normalization, canonical identity resolution, alias tracking, material-change versioning, and pending enrichment outbox recording. Broker publication of the canonicalizer-to-enrichment request is intentionally held until the contracts package adds a dedicated enrichment request payload schema.
 
 ## Owner
 
@@ -51,7 +51,18 @@ Important variables:
 
 ## Service Boundary
 
-The service registers the contracted `canonicalization` consumer route and downstream `enrichment` publish route through the shared runtime broker lifecycle. The message processor validates worker envelopes and canonicalization payloads, applies the durable idempotency interface, delegates work to the injected canonicalizer handler, and drains in-flight deliveries during shutdown.
+The service registers the contracted `canonicalization` consumer route and downstream `enrichment` publish route through the shared runtime broker lifecycle. The message processor validates worker envelopes and canonicalization payloads, applies the durable idempotency interface, delegates work to the canonicalizer handler, and drains in-flight deliveries during shutdown.
+
+The canonicalizer handler:
+
+- normalizes HTTP(S) article URLs by lowercasing scheme and host, stripping fragments and default ports, removing approved tracking parameters, and deterministically sorting retained query parameters;
+- preserves identity-significant query parameters rather than collapsing all query strings;
+- records `new`, `duplicate`, `alias`, `changed`, `ambiguous`, and `invalid` decisions with safe reasons;
+- records candidate-to-article aliases and source GUID aliases in the canonical state model;
+- versions material changes using safe feed metadata;
+- records pending enrichment requests in the same transaction callback as the identity decision.
+
+Pending enrichment requests are stored as outbox intent only. The current `@ramideltoro/nutsnews-worker-contracts@0.3.1` package does not expose a broker-valid canonicalizer-to-enrichment request payload; follow-up contracts work is tracked in `ramideltoro/nutsnews-worker-contracts#16`.
 
 The repository includes test interfaces and local doubles for:
 

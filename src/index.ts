@@ -14,6 +14,7 @@ import {
   loadCanonicalizerConfig,
   type CanonicalizerConfig
 } from "./config.js";
+import { createCanonicalizationWorkHandler } from "./canonicalization.js";
 import { createCanonicalizerHttpServer } from "./http.js";
 import { createCanonicalizerService } from "./service.js";
 import { createLocalCanonicalizerDependencies } from "./test-doubles.js";
@@ -27,8 +28,14 @@ export {
 } from "./config.js";
 export type {
   CanonicalBrokerOutbox,
+  CanonicalCandidateInput,
+  CanonicalCandidatePayload,
   CanonicalDatabaseTransaction,
   CanonicalDatabaseTransactionRunner,
+  CanonicalDecisionKind,
+  CanonicalEnrichmentRequest,
+  CanonicalInvalidDecision,
+  CanonicalResolutionDecision,
   CanonicalizerDependencies,
   CanonicalizerDependencyProbe,
   CanonicalizerWorkHandler,
@@ -36,9 +43,18 @@ export type {
   CanonicalStateStore
 } from "./dependencies.js";
 export {
+  createCanonicalizationWorkHandler,
+  type CanonicalizationWorkHandlerOptions
+} from "./canonicalization.js";
+export {
   createCanonicalizerHttpServer,
   type CanonicalizerHttpServer
 } from "./http.js";
+export {
+  sha256Hex,
+  stableArticleId,
+  stableEnrichmentRequestId
+} from "./ids.js";
 export {
   createCanonicalizerService,
   type CanonicalizerService
@@ -55,6 +71,11 @@ export {
   createMinimalCanonicalizationEnvelope,
   createMinimalCanonicalizationPayload
 } from "./test-doubles.js";
+export {
+  normalizeArticleUrl,
+  type ArticleUrlNormalizationResult,
+  type NormalizedArticleUrl
+} from "./url-normalization.js";
 
 export interface CanonicalizerApplication {
   readonly config: CanonicalizerConfig;
@@ -83,9 +104,19 @@ export function createCanonicalizerApplication(config = loadCanonicalizerConfig(
       })
     : undefined;
   const telemetry = combineTelemetrySinks(logSink, metrics);
-  const dependencies = createLocalCanonicalizerDependencies({
+  const baseDependencies = createLocalCanonicalizerDependencies({
     clock: SYSTEM_RUNTIME_CLOCK
   });
+  const dependencies = {
+    ...baseDependencies,
+    workHandler: createCanonicalizationWorkHandler({
+      config,
+      dependencies: baseDependencies,
+      ...(telemetry === undefined ? {} : {
+        telemetry
+      })
+    })
+  };
   const service = createCanonicalizerService({
     config,
     dependencies,

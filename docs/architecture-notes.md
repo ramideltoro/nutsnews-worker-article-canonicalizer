@@ -2,7 +2,7 @@
 
 ## Scope
 
-The article canonicalizer owns the worker-uplift service boundary that consumes `canonicalArticleCandidate` messages on the contracted `canonicalization` route. Issue #98 creates the deployable shell, dependency seams, health endpoints, and CI/container baseline. Later issues add canonical URL normalization, canonical identity assignment, and dedupe business logic.
+The article canonicalizer owns the worker-uplift service boundary that consumes `canonicalArticleCandidate` messages on the contracted `canonicalization` route. It normalizes article identity inputs, resolves canonical article IDs, records duplicate and alias decisions, versions material changes, and stores pending enrichment outbox intent.
 
 ## Runtime Surfaces
 
@@ -25,7 +25,26 @@ The article canonicalizer owns the worker-uplift service boundary that consumes 
 7. Expose canonical state, database transaction, and broker outbox tools to the handler.
 8. Drain in-flight handlers before broker shutdown.
 
-The bootstrap handler is intentionally local and value-free. It does not implement identity normalization, dedupe decisions, page enrichment, AI, approval, translation, persistence, or publication logic.
+The handler remains value-free: it never stores article bodies, AI output, credentials, or production secret values. It does not fetch article pages, call AI providers, approve content, translate content, persist backend article rows, or publish user-facing articles.
+
+## Canonical Identity Flow
+
+Identity resolution uses safe canonicalization payload fields only.
+
+1. Normalize `canonicalUrl` first. The normalized URL is the primary identity seed and is stable across feed retries and cross-feed duplicates.
+2. Remove only approved tracking parameters such as `utm_*`, `gclid`, `fbclid`, `ref`, and similar campaign identifiers.
+3. Preserve identity-significant query parameters, sort them deterministically, strip fragments, strip default ports, and normalize scheme and host casing.
+4. Use `(feedId, sourceItemId)` as a source GUID alias, not as the primary canonical article ID when a normalized URL exists.
+5. Use feed title and publication time in the material fingerprint so meaningful feed metadata changes create a new article version without losing the canonical article history.
+6. Record conflicts between a known source GUID alias and a different known normalized URL alias as `ambiguous`.
+
+The state model records candidate decisions and aliases so replayed candidate IDs return `duplicate` without scheduling additional enrichment work. New and changed decisions record one pending enrichment outbox item inside the same transaction callback as the identity decision.
+
+## Contracts Gap
+
+The current contracts package exposes `canonicalArticleCandidate` on the `canonicalization` stage and `enrichmentResult` on the `enrichment` stage. It does not expose a canonicalizer-to-enrichment request payload schema.
+
+Until `ramideltoro/nutsnews-worker-contracts#16` adds that request contract, this repository records a typed pending enrichment request but does not publish a broker message that downstream enrichment consumers would reject as a stage or payload mismatch.
 
 ## Dependency Interfaces
 
