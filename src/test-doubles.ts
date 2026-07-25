@@ -28,14 +28,27 @@ import {
 
 import type {
   CanonicalBrokerOutbox,
+  CanonicalCandidateInput,
+  CanonicalCandidatePayload,
   CanonicalDatabaseTransaction,
   CanonicalDatabaseTransactionRunner,
+  CanonicalEnrichmentRequest,
+  CanonicalInvalidDecision,
+  CanonicalResolutionDecision,
   CanonicalizerDependencies,
   CanonicalizerDependencyProbe,
   CanonicalizerWorkHandler,
   CanonicalizerWorkTools,
   CanonicalStateStore
 } from "./dependencies.js";
+import { stableArticleId } from "./ids.js";
+
+interface CanonicalArticleRecord {
+  readonly canonicalArticleId: string;
+  readonly normalizedUrls: Set<string>;
+  articleVersion: number;
+  materialFingerprint: string;
+}
 
 export class ManualCanonicalizerClock implements RuntimeClock {
   private current: Date;
@@ -56,6 +69,11 @@ export class ManualCanonicalizerClock implements RuntimeClock {
 export class InMemoryCanonicalStateStore implements CanonicalStateStore {
   readonly name: string = "local-canonical-state";
   status: CanonicalizerDependencyProbe["status"] = "ok";
+  readonly decisions: (CanonicalResolutionDecision | CanonicalInvalidDecision)[] = [];
+  private readonly articles = new Map<string, CanonicalArticleRecord>();
+  private readonly urlAliases = new Map<string, string>();
+  private readonly sourceAliases = new Map<string, string>();
+  private readonly candidateDecisions = new Map<string, CanonicalResolutionDecision>();
   private readonly store;
 
   constructor(clock: RuntimeClock = new ManualCanonicalizerClock()) {
@@ -79,6 +97,205 @@ export class InMemoryCanonicalStateStore implements CanonicalStateStore {
 
   markFailed(idempotencyKey: string, failure: RuntimeIdempotencyFailure): Promise<void> {
     return this.store.markFailed(idempotencyKey, failure);
+  }
+
+  resolveCandidate(input: CanonicalCandidateInput, transaction: CanonicalDatabaseTransaction): Promise<CanonicalResolutionDecision> {
+    const existingCandidateDecision = this.candidateDecisions.get(input.candidateId);
+
+    if (existingCandidateDecision !== undefined) {
+      const duplicateDecision = this.decision(input, transaction, {
+        decision: "duplicate",
+        canonicalArticleId: existingCandidateDecision.canonicalArticleId,
+        articleVersion: existingCandidateDecision.articleVersion,
+        reasons: [
+          "candidate-replay"
+        ],
+        publishEnrichment: false
+      });
+
+      this.decisions.push(duplicateDecision);
+      return Promise.resolve(duplicateDecision);
+    }
+
+    if (input.dedupeStatus === "duplicate" && input.duplicateOfArticleId !== undefined) {
+      const duplicateDecision = this.decision(input, transaction, {
+        decision: "duplicate",
+        canonicalArticleId: input.duplicateOfArticleId,
+        articleVersion: 1,
+        reasons: [
+          "upstream-duplicate-hint"
+        ],
+        publishEnrichment: false
+      });
+
+      this.rememberAliases(input, input.duplicateOfArticleId);
+      this.candidateDecisions.set(input.candidateId, duplicateDecision);
+      this.decisions.push(duplicateDecision);
+      return Promise.resolve(duplicateDecision);
+    }
+
+    const sourceKey = sourceAliasKey(input);
+    const articleIdBySource = this.sourceAliases.get(sourceKey);
+    const articleIdByUrl = this.urlAliases.get(input.normalizedUrl);
+
+    if (articleIdBySource !== undefined && articleIdByUrl !== undefined && articleIdBySource !== articleIdByUrl) {
+      const ambiguousDecision = this.decision(input, transaction, {
+        decision: "ambiguous",
+        canonicalArticleId: articleIdBySource,
+        articleVersion: this.articles.get(articleIdBySource)?.articleVersion ?? 1,
+        reasons: [
+          "source-guid-url-conflict"
+        ],
+        publishEnrichment: false
+      });
+
+      this.candidateDecisions.set(input.candidateId, ambiguousDecision);
+      this.decisions.push(ambiguousDecision);
+      return Promise.resolve(ambiguousDecision);
+    }
+
+    const existingArticleId = articleIdBySource ?? articleIdByUrl;
+
+    if (existingArticleId === undefined) {
+      const canonicalArticleId = stableArticleId([
+        input.identitySeed
+      ]);
+      const record: CanonicalArticleRecord = {
+        canonicalArticleId,
+        normalizedUrls: new Set([
+          input.normalizedUrl
+        ]),
+        articleVersion: 1,
+        materialFingerprint: input.materialFingerprint
+      };
+      const newDecision = this.decision(input, transaction, {
+        decision: "new",
+        canonicalArticleId,
+        articleVersion: record.articleVersion,
+        reasons: [
+          "normalized-url-first-seen"
+        ],
+        publishEnrichment: true
+      });
+
+      this.articles.set(canonicalArticleId, record);
+      this.rememberAliases(input, canonicalArticleId);
+      this.candidateDecisions.set(input.candidateId, newDecision);
+      this.decisions.push(newDecision);
+      return Promise.resolve(newDecision);
+    }
+
+    const record = this.articles.get(existingArticleId);
+
+    if (record === undefined) {
+      const duplicateDecision = this.decision(input, transaction, {
+        decision: "duplicate",
+        canonicalArticleId: existingArticleId,
+        articleVersion: 1,
+        reasons: [
+          "external-duplicate-alias"
+        ],
+        publishEnrichment: false
+      });
+
+      this.rememberAliases(input, existingArticleId);
+      this.candidateDecisions.set(input.candidateId, duplicateDecision);
+      this.decisions.push(duplicateDecision);
+      return Promise.resolve(duplicateDecision);
+    }
+
+    const isNewAlias = !record.normalizedUrls.has(input.normalizedUrl);
+
+    if (isNewAlias) {
+      record.normalizedUrls.add(input.normalizedUrl);
+      this.rememberAliases(input, record.canonicalArticleId);
+
+      const aliasDecision = this.decision(input, transaction, {
+        decision: "alias",
+        canonicalArticleId: record.canonicalArticleId,
+        articleVersion: record.articleVersion,
+        reasons: [
+          "new-url-alias"
+        ],
+        publishEnrichment: false
+      });
+
+      this.candidateDecisions.set(input.candidateId, aliasDecision);
+      this.decisions.push(aliasDecision);
+      return Promise.resolve(aliasDecision);
+    }
+
+    if (record.materialFingerprint !== input.materialFingerprint) {
+      record.articleVersion += 1;
+      record.materialFingerprint = input.materialFingerprint;
+      this.rememberAliases(input, record.canonicalArticleId);
+
+      const changedDecision = this.decision(input, transaction, {
+        decision: "changed",
+        canonicalArticleId: record.canonicalArticleId,
+        articleVersion: record.articleVersion,
+        reasons: [
+          "material-fingerprint-changed"
+        ],
+        publishEnrichment: true
+      });
+
+      this.candidateDecisions.set(input.candidateId, changedDecision);
+      this.decisions.push(changedDecision);
+      return Promise.resolve(changedDecision);
+    }
+
+    this.rememberAliases(input, record.canonicalArticleId);
+
+    const duplicateDecision = this.decision(input, transaction, {
+      decision: "duplicate",
+      canonicalArticleId: record.canonicalArticleId,
+      articleVersion: record.articleVersion,
+      reasons: [
+        "material-fingerprint-match"
+      ],
+      publishEnrichment: false
+    });
+
+    this.candidateDecisions.set(input.candidateId, duplicateDecision);
+    this.decisions.push(duplicateDecision);
+    return Promise.resolve(duplicateDecision);
+  }
+
+  recordInvalidCandidate(input: CanonicalCandidatePayload, decision: CanonicalInvalidDecision): Promise<void> {
+    void input;
+    this.decisions.push(decision);
+    return Promise.resolve();
+  }
+
+  private decision(
+    input: CanonicalCandidateInput,
+    transaction: CanonicalDatabaseTransaction,
+    values: {
+      readonly decision: CanonicalResolutionDecision["decision"];
+      readonly canonicalArticleId: string;
+      readonly articleVersion: number;
+      readonly reasons: readonly string[];
+      readonly publishEnrichment: boolean;
+    }
+  ): CanonicalResolutionDecision {
+    void transaction;
+    return {
+      decision: values.decision,
+      canonicalArticleId: values.canonicalArticleId,
+      articleVersion: values.articleVersion,
+      normalizedUrl: input.normalizedUrl,
+      materialFingerprint: input.materialFingerprint,
+      reasons: values.reasons,
+      publishEnrichment: values.publishEnrichment,
+      transaction,
+      decidedAt: input.decidedAt
+    };
+  }
+
+  private rememberAliases(input: CanonicalCandidateInput, canonicalArticleId: string): void {
+    this.sourceAliases.set(sourceAliasKey(input), canonicalArticleId);
+    this.urlAliases.set(input.normalizedUrl, canonicalArticleId);
   }
 }
 
@@ -108,6 +325,7 @@ export class LocalCanonicalTransactionRunner implements CanonicalDatabaseTransac
 export class LocalCanonicalBrokerOutbox implements CanonicalBrokerOutbox {
   readonly name: string = "local-broker-outbox";
   status: CanonicalizerDependencyProbe["status"] = "ok";
+  readonly pendingEnrichment: { readonly request: CanonicalEnrichmentRequest; readonly transaction: CanonicalDatabaseTransaction }[] = [];
   readonly records: { readonly command: BrokerPublishCommand; readonly receipt: BrokerPublishReceipt }[] = [];
 
   probe(): CanonicalizerDependencyProbe {
@@ -121,6 +339,14 @@ export class LocalCanonicalBrokerOutbox implements CanonicalBrokerOutbox {
     this.records.push({
       command,
       receipt
+    });
+    return Promise.resolve();
+  }
+
+  recordPendingEnrichment(request: CanonicalEnrichmentRequest, transaction: CanonicalDatabaseTransaction): Promise<void> {
+    this.pendingEnrichment.push({
+      request,
+      transaction
     });
     return Promise.resolve();
   }
@@ -330,4 +556,8 @@ export function createMinimalCanonicalizationDelivery(
     payload: createMinimalCanonicalizationPayload(overrides.payload),
     receivedAt: "2026-07-23T00:00:01.000Z"
   };
+}
+
+function sourceAliasKey(input: Pick<CanonicalCandidateInput, "feedId" | "sourceItemId">): string {
+  return `${input.feedId}\u001f${input.sourceItemId}`;
 }

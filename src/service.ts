@@ -72,6 +72,7 @@ export function createCanonicalizerService(options: CanonicalizerServiceOptions)
           options.metrics?.setInFlight(canonicalizationRoute.mainQueue.name, drain.inFlight);
           const result = await options.dependencies.workHandler.handle(context, {
             publish: (command) => broker.publish(command),
+            recordPendingEnrichment: (request, transaction) => options.dependencies.brokerOutbox.recordPendingEnrichment(request, transaction),
             recordOutbox: (command, receipt) => options.dependencies.brokerOutbox.record(command, receipt),
             withTransaction: (operation) => options.dependencies.transactionRunner.withTransaction(operation)
           });
