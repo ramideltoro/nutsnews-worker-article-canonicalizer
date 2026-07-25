@@ -39,7 +39,7 @@
     "ci": "npm run lint && npm run typecheck && npm run test && npm run test:integration && npm run build && npm run sbom && npm run audit:prod"
   },
   "dependencies": {
-    "@ramideltoro/nutsnews-worker-contracts": "0.3.1",
+    "@ramideltoro/nutsnews-worker-contracts": "0.4.0",
     "@ramideltoro/nutsnews-worker-runtime": "0.4.0"
   },
   "devDependencies": {

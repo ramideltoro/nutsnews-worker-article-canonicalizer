@@ -53,7 +53,8 @@ export {
 export {
   sha256Hex,
   stableArticleId,
-  stableEnrichmentRequestId
+  stableEnrichmentRequestId,
+  stableUuid
 } from "./ids.js";
 export {
   buildCanonicalReplayReport,
@@ -200,7 +201,7 @@ function assertPackageCompatibility(): void {
   const contractsVersion: string = contracts.packageVersion;
   const runtimeVersion: string = runtime.packageVersion;
 
-  if (contractsVersion !== "0.3.1") {
+  if (contractsVersion !== "0.4.0") {
     throw new Error(`Unsupported contracts package version ${contractsVersion}.`);
   }
 
