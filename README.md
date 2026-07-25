@@ -64,6 +64,8 @@ The canonicalizer handler:
 
 Pending enrichment requests are stored as outbox intent only. The current `@ramideltoro/nutsnews-worker-contracts@0.3.1` package does not expose a broker-valid canonicalizer-to-enrichment request payload; follow-up contracts work is tracked in `ramideltoro/nutsnews-worker-contracts#16`.
 
+Concurrency, replay, crash-point, and ambiguity proof notes live in `docs/replay-proof.md`.
+
 The repository includes test interfaces and local doubles for:
 
 - broker transport;
