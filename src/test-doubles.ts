@@ -113,14 +113,17 @@ export class InMemoryCanonicalStateStore implements CanonicalStateStore {
         publishEnrichment: false
       });
 
-      this.decisions.push(duplicateDecision);
+      this.stageCommit(transaction, () => {
+        this.decisions.push(duplicateDecision);
+      });
       return Promise.resolve(duplicateDecision);
     }
 
     if (input.dedupeStatus === "duplicate" && input.duplicateOfArticleId !== undefined) {
+      const duplicateOfArticleId = input.duplicateOfArticleId;
       const duplicateDecision = this.decision(input, transaction, {
         decision: "duplicate",
-        canonicalArticleId: input.duplicateOfArticleId,
+        canonicalArticleId: duplicateOfArticleId,
         articleVersion: 1,
         reasons: [
           "upstream-duplicate-hint"
@@ -128,9 +131,11 @@ export class InMemoryCanonicalStateStore implements CanonicalStateStore {
         publishEnrichment: false
       });
 
-      this.rememberAliases(input, input.duplicateOfArticleId);
-      this.candidateDecisions.set(input.candidateId, duplicateDecision);
-      this.decisions.push(duplicateDecision);
+      this.stageCommit(transaction, () => {
+        this.rememberAliases(input, duplicateOfArticleId);
+        this.candidateDecisions.set(input.candidateId, duplicateDecision);
+        this.decisions.push(duplicateDecision);
+      });
       return Promise.resolve(duplicateDecision);
     }
 
@@ -149,8 +154,10 @@ export class InMemoryCanonicalStateStore implements CanonicalStateStore {
         publishEnrichment: false
       });
 
-      this.candidateDecisions.set(input.candidateId, ambiguousDecision);
-      this.decisions.push(ambiguousDecision);
+      this.stageCommit(transaction, () => {
+        this.candidateDecisions.set(input.candidateId, ambiguousDecision);
+        this.decisions.push(ambiguousDecision);
+      });
       return Promise.resolve(ambiguousDecision);
     }
 
@@ -178,10 +185,12 @@ export class InMemoryCanonicalStateStore implements CanonicalStateStore {
         publishEnrichment: true
       });
 
-      this.articles.set(canonicalArticleId, record);
-      this.rememberAliases(input, canonicalArticleId);
-      this.candidateDecisions.set(input.candidateId, newDecision);
-      this.decisions.push(newDecision);
+      this.stageCommit(transaction, () => {
+        this.articles.set(canonicalArticleId, record);
+        this.rememberAliases(input, canonicalArticleId);
+        this.candidateDecisions.set(input.candidateId, newDecision);
+        this.decisions.push(newDecision);
+      });
       return Promise.resolve(newDecision);
     }
 
@@ -198,18 +207,17 @@ export class InMemoryCanonicalStateStore implements CanonicalStateStore {
         publishEnrichment: false
       });
 
-      this.rememberAliases(input, existingArticleId);
-      this.candidateDecisions.set(input.candidateId, duplicateDecision);
-      this.decisions.push(duplicateDecision);
+      this.stageCommit(transaction, () => {
+        this.rememberAliases(input, existingArticleId);
+        this.candidateDecisions.set(input.candidateId, duplicateDecision);
+        this.decisions.push(duplicateDecision);
+      });
       return Promise.resolve(duplicateDecision);
     }
 
     const isNewAlias = !record.normalizedUrls.has(input.normalizedUrl);
 
     if (isNewAlias) {
-      record.normalizedUrls.add(input.normalizedUrl);
-      this.rememberAliases(input, record.canonicalArticleId);
-
       const aliasDecision = this.decision(input, transaction, {
         decision: "alias",
         canonicalArticleId: record.canonicalArticleId,
@@ -220,32 +228,37 @@ export class InMemoryCanonicalStateStore implements CanonicalStateStore {
         publishEnrichment: false
       });
 
-      this.candidateDecisions.set(input.candidateId, aliasDecision);
-      this.decisions.push(aliasDecision);
+      this.stageCommit(transaction, () => {
+        record.normalizedUrls.add(input.normalizedUrl);
+        this.rememberAliases(input, record.canonicalArticleId);
+        this.candidateDecisions.set(input.candidateId, aliasDecision);
+        this.decisions.push(aliasDecision);
+      });
       return Promise.resolve(aliasDecision);
     }
 
     if (record.materialFingerprint !== input.materialFingerprint) {
-      record.articleVersion += 1;
-      record.materialFingerprint = input.materialFingerprint;
-      this.rememberAliases(input, record.canonicalArticleId);
+      const nextArticleVersion = record.articleVersion + 1;
 
       const changedDecision = this.decision(input, transaction, {
         decision: "changed",
         canonicalArticleId: record.canonicalArticleId,
-        articleVersion: record.articleVersion,
+        articleVersion: nextArticleVersion,
         reasons: [
           "material-fingerprint-changed"
         ],
         publishEnrichment: true
       });
 
-      this.candidateDecisions.set(input.candidateId, changedDecision);
-      this.decisions.push(changedDecision);
+      this.stageCommit(transaction, () => {
+        record.articleVersion = nextArticleVersion;
+        record.materialFingerprint = input.materialFingerprint;
+        this.rememberAliases(input, record.canonicalArticleId);
+        this.candidateDecisions.set(input.candidateId, changedDecision);
+        this.decisions.push(changedDecision);
+      });
       return Promise.resolve(changedDecision);
     }
-
-    this.rememberAliases(input, record.canonicalArticleId);
 
     const duplicateDecision = this.decision(input, transaction, {
       decision: "duplicate",
@@ -257,8 +270,11 @@ export class InMemoryCanonicalStateStore implements CanonicalStateStore {
       publishEnrichment: false
     });
 
-    this.candidateDecisions.set(input.candidateId, duplicateDecision);
-    this.decisions.push(duplicateDecision);
+    this.stageCommit(transaction, () => {
+      this.rememberAliases(input, record.canonicalArticleId);
+      this.candidateDecisions.set(input.candidateId, duplicateDecision);
+      this.decisions.push(duplicateDecision);
+    });
     return Promise.resolve(duplicateDecision);
   }
 
@@ -282,6 +298,9 @@ export class InMemoryCanonicalStateStore implements CanonicalStateStore {
     void transaction;
     return {
       decision: values.decision,
+      candidateId: input.candidateId,
+      feedId: input.feedId,
+      sourceItemId: input.sourceItemId,
       canonicalArticleId: values.canonicalArticleId,
       articleVersion: values.articleVersion,
       normalizedUrl: input.normalizedUrl,
@@ -297,12 +316,22 @@ export class InMemoryCanonicalStateStore implements CanonicalStateStore {
     this.sourceAliases.set(sourceAliasKey(input), canonicalArticleId);
     this.urlAliases.set(input.normalizedUrl, canonicalArticleId);
   }
+
+  private stageCommit(transaction: CanonicalDatabaseTransaction, operation: () => void): void {
+    if (transaction.addCommitOperation === undefined) {
+      operation();
+      return;
+    }
+
+    transaction.addCommitOperation(operation);
+  }
 }
 
 export class LocalCanonicalTransactionRunner implements CanonicalDatabaseTransactionRunner {
   readonly name: string = "local-database-transactions";
   status: CanonicalizerDependencyProbe["status"] = "ok";
   readonly transactions: CanonicalDatabaseTransaction[] = [];
+  private transactionTail: Promise<void> = Promise.resolve();
 
   probe(): CanonicalizerDependencyProbe {
     return {
@@ -312,13 +341,34 @@ export class LocalCanonicalTransactionRunner implements CanonicalDatabaseTransac
   }
 
   async withTransaction<T>(operation: (transaction: CanonicalDatabaseTransaction) => Promise<T>): Promise<T> {
-    const transaction = {
+    const previousTransaction = this.transactionTail;
+    let releaseTransaction!: () => void;
+    this.transactionTail = new Promise((resolve) => {
+      releaseTransaction = resolve;
+    });
+
+    await previousTransaction;
+
+    const commitOperations: (() => void)[] = [];
+    const transaction: CanonicalDatabaseTransaction = {
+      addCommitOperation: (commitOperation) => {
+        commitOperations.push(commitOperation);
+      },
       transactionId: `local-transaction-${String(this.transactions.length + 1)}`
     };
 
-    this.transactions.push(transaction);
+    try {
+      this.transactions.push(transaction);
+      const result = await operation(transaction);
 
-    return operation(transaction);
+      for (const commitOperation of commitOperations) {
+        commitOperation();
+      }
+
+      return result;
+    } finally {
+      releaseTransaction();
+    }
   }
 }
 
@@ -344,10 +394,19 @@ export class LocalCanonicalBrokerOutbox implements CanonicalBrokerOutbox {
   }
 
   recordPendingEnrichment(request: CanonicalEnrichmentRequest, transaction: CanonicalDatabaseTransaction): Promise<void> {
-    this.pendingEnrichment.push({
-      request,
-      transaction
-    });
+    const record = () => {
+      this.pendingEnrichment.push({
+        request,
+        transaction
+      });
+    };
+
+    if (transaction.addCommitOperation === undefined) {
+      record();
+    } else {
+      transaction.addCommitOperation(record);
+    }
+
     return Promise.resolve();
   }
 }

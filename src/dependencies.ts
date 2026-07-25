@@ -22,6 +22,7 @@ export interface CanonicalStateStore extends RuntimeIdempotencyStore {
 
 export interface CanonicalDatabaseTransaction {
   readonly transactionId: string;
+  addCommitOperation?(operation: () => void): void;
 }
 
 export interface CanonicalDatabaseTransactionRunner {
@@ -89,6 +90,9 @@ export type CanonicalDecisionKind =
 
 export interface CanonicalResolutionDecision {
   readonly decision: Exclude<CanonicalDecisionKind, "invalid">;
+  readonly candidateId: string;
+  readonly feedId: string;
+  readonly sourceItemId: string;
   readonly canonicalArticleId: string;
   readonly articleVersion: number;
   readonly normalizedUrl: string;
@@ -101,6 +105,10 @@ export interface CanonicalResolutionDecision {
 
 export interface CanonicalInvalidDecision {
   readonly decision: "invalid";
+  readonly candidateId: string;
+  readonly feedId: string;
+  readonly sourceItemId: string;
+  readonly canonicalUrl: string;
   readonly reasons: readonly string[];
   readonly decidedAt: string;
 }

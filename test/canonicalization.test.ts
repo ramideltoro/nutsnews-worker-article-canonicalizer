@@ -285,6 +285,10 @@ describe("createCanonicalizationWorkHandler", () => {
     });
     expect(inMemoryStateStore(dependencies).decisions[0]).toEqual({
       decision: "invalid",
+      candidateId: "candidate-world-001",
+      feedId: "feed-world",
+      sourceItemId: "guid-001",
+      canonicalUrl: "ftp://articles.example.test/news/story",
       reasons: [
         "unsupported-scheme"
       ],

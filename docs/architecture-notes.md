@@ -40,6 +40,8 @@ Identity resolution uses safe canonicalization payload fields only.
 
 The state model records candidate decisions and aliases so replayed candidate IDs return `duplicate` without scheduling additional enrichment work. New and changed decisions record one pending enrichment outbox item inside the same transaction callback as the identity decision.
 
+Local transaction doubles serialize transaction callbacks and stage state/outbox commit operations until the callback succeeds. This keeps race and crash tests aligned with the intended production database invariant: canonical identity state and pending enrichment outbox intent commit together or not at all.
+
 ## Contracts Gap
 
 The current contracts package exposes `canonicalArticleCandidate` on the `canonicalization` stage and `enrichmentResult` on the `enrichment` stage. It does not expose a canonicalizer-to-enrichment request payload schema.

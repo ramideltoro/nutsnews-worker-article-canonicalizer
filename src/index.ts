@@ -56,6 +56,15 @@ export {
   stableEnrichmentRequestId
 } from "./ids.js";
 export {
+  buildCanonicalReplayReport,
+  type BuildCanonicalReplayReportOptions,
+  type CanonicalAmbiguityReviewItem,
+  type CanonicalDecision,
+  type CanonicalReplayLegacySummary,
+  type CanonicalReplayRateComparison,
+  type CanonicalReplayReport
+} from "./replay-report.js";
+export {
   createCanonicalizerService,
   type CanonicalizerService
 } from "./service.js";

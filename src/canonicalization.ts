@@ -48,6 +48,10 @@ async function handleCanonicalization(
   if (!normalized.ok) {
     await options.dependencies.stateStore.recordInvalidCandidate(candidate, {
       decision: "invalid",
+      candidateId: candidate.candidateId,
+      feedId: candidate.feedId,
+      sourceItemId: candidate.sourceItemId,
+      canonicalUrl: candidate.canonicalUrl,
       reasons: [
         normalized.reason
       ],
