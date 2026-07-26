@@ -16,6 +16,7 @@ import {
 } from "./config.js";
 import { createCanonicalizationWorkHandler } from "./canonicalization.js";
 import { createCanonicalizerHttpServer } from "./http.js";
+import { PayloadRabbitMqTransport } from "./rabbitmq-transport.js";
 import { createCanonicalizerService } from "./service.js";
 import { createLocalCanonicalizerDependencies } from "./test-doubles.js";
 
@@ -70,6 +71,9 @@ export {
   type CanonicalizerService
 } from "./service.js";
 export {
+  PayloadRabbitMqTransport
+} from "./rabbitmq-transport.js";
+export {
   InMemoryCanonicalStateStore,
   LocalBrokerTransport,
   LocalCanonicalBrokerOutbox,
@@ -114,8 +118,18 @@ export function createCanonicalizerApplication(config = loadCanonicalizerConfig(
       })
     : undefined;
   const telemetry = combineTelemetrySinks(logSink, metrics);
+  const productionBrokerTransport = config.dependencyMode === "production"
+    ? new PayloadRabbitMqTransport({
+        url: requiredEnv("NUTSNEWS_CANONICALIZER_RABBITMQ_URL"),
+        prefetch: config.prefetch,
+        clock: SYSTEM_RUNTIME_CLOCK
+      })
+    : undefined;
   const baseDependencies = createLocalCanonicalizerDependencies({
-    clock: SYSTEM_RUNTIME_CLOCK
+    clock: SYSTEM_RUNTIME_CLOCK,
+    ...(productionBrokerTransport === undefined ? {} : {
+      brokerTransport: productionBrokerTransport
+    })
   });
   const dependencies = {
     ...baseDependencies,
@@ -208,6 +222,16 @@ function assertPackageCompatibility(): void {
   if (runtimeVersion !== "0.4.0") {
     throw new Error(`Unsupported runtime package version ${runtimeVersion}.`);
   }
+}
+
+function requiredEnv(key: string): string {
+  const value = process.env[key]?.trim();
+
+  if (value === undefined || value.length === 0) {
+    throw new Error(`${key} is required for production canonicalizer dependencies.`);
+  }
+
+  return value;
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
