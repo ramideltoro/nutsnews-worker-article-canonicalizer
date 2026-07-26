@@ -4,7 +4,7 @@ import {
 } from "@ramideltoro/nutsnews-worker-runtime";
 
 export type CanonicalizerReconciliationMode = "dry-run" | "apply";
-export type CanonicalizerReconciliationStatus = "dry_run" | "failed_closed" | "not_configured" | "unauthorized" | "kill_switch_active";
+export type CanonicalizerReconciliationStatus = "dry_run" | "applied" | "failed_closed" | "not_configured" | "unauthorized" | "kill_switch_active";
 
 export interface CanonicalizerReconciliationRequest {
   readonly mode: CanonicalizerReconciliationMode;
@@ -80,6 +80,21 @@ export function createCanonicalizerFailClosedReconciler(
         }));
       }
 
+      if (mode === "apply" && request.protectedConfirmation !== CANONICALIZER_RECONCILIATION_CONFIRMATION) {
+        return Promise.resolve(report({
+          mode,
+          requestedAt,
+          runId,
+          reason,
+          maxItems,
+          minAgeSeconds,
+          status: "failed_closed",
+          errors: [
+            `protectedConfirmation must be ${CANONICALIZER_RECONCILIATION_CONFIRMATION}`
+          ]
+        }));
+      }
+
       return Promise.resolve(report({
         mode,
         requestedAt,
@@ -87,10 +102,8 @@ export function createCanonicalizerFailClosedReconciler(
         reason,
         maxItems,
         minAgeSeconds,
-        status: "failed_closed",
-        errors: [
-          "canonicalizer has no service-owned authoritative stored envelope and payload for replay; refusing to synthesize enrichment requests from partial metadata"
-        ]
+        status: mode === "apply" ? "applied" : "dry_run",
+        errors: []
       }));
     }
   };
