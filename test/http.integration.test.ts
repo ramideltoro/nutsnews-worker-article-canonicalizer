@@ -11,8 +11,14 @@ import {
   createCanonicalizerHttpServer,
   type CanonicalizerHttpServer
 } from "../src/http.js";
+import {
+  createCanonicalizerFailClosedReconciler
+} from "../src/reconciliation.js";
 import { createCanonicalizerService } from "../src/service.js";
-import { createLocalCanonicalizerDependencies } from "../src/test-doubles.js";
+import {
+  ManualCanonicalizerClock,
+  createLocalCanonicalizerDependencies
+} from "../src/test-doubles.js";
 
 let activeServer: CanonicalizerHttpServer | undefined;
 
@@ -66,6 +72,53 @@ describe("canonicalizer HTTP endpoints", () => {
 
     expect(schema.variables.some((variable) => variable.name === "NUTSNEWS_CANONICALIZER_RABBITMQ_URL" && variable.sensitive)).toBe(true);
     expect(JSON.stringify(schema)).not.toContain("amqp://");
+
+    await service.stop();
+  });
+
+  it("protects the reconciliation endpoint with bearer auth", async () => {
+    const config = loadCanonicalizerConfig({
+      NUTSNEWS_CANONICALIZER_HTTP_HOST: "127.0.0.1",
+      NUTSNEWS_CANONICALIZER_HTTP_PORT: "0",
+      NUTSNEWS_CANONICALIZER_TELEMETRY_LOGS: "silent"
+    });
+    const service = createCanonicalizerService({
+      config,
+      dependencies: createLocalCanonicalizerDependencies()
+    });
+    activeServer = createCanonicalizerHttpServer({
+      config,
+      service,
+      reconciler: createCanonicalizerFailClosedReconciler(new ManualCanonicalizerClock()),
+      reconciliationToken: "test-token"
+    });
+
+    await service.start();
+    await activeServer.listen();
+
+    const unauthorized = await fetch(activeServer.url("/reconcile/outbox"), {
+      method: "POST",
+      body: JSON.stringify({
+        mode: "dry-run"
+      })
+    });
+    expect(unauthorized.status).toBe(401);
+
+    const authorized = await fetch(activeServer.url("/reconcile/outbox"), {
+      method: "POST",
+      headers: {
+        authorization: "Bearer test-token"
+      },
+      body: JSON.stringify({
+        mode: "dry-run"
+      })
+    });
+    expect(authorized.status).toBe(409);
+    await expect(authorized.json()).resolves.toMatchObject({
+      status: "failed_closed",
+      writesPerformed: false,
+      productionVisibilityEnabled: false
+    });
 
     await service.stop();
   });

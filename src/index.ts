@@ -17,6 +17,9 @@ import {
 import { createCanonicalizationWorkHandler } from "./canonicalization.js";
 import { createCanonicalizerHttpServer } from "./http.js";
 import { PayloadRabbitMqTransport } from "./rabbitmq-transport.js";
+import {
+  createCanonicalizerFailClosedReconciler
+} from "./reconciliation.js";
 import { createCanonicalizerService } from "./service.js";
 import { createLocalCanonicalizerDependencies } from "./test-doubles.js";
 
@@ -74,6 +77,14 @@ export {
   PayloadRabbitMqTransport
 } from "./rabbitmq-transport.js";
 export {
+  CANONICALIZER_RECONCILIATION_CONFIRMATION,
+  CANONICALIZER_RECONCILIATION_PATH,
+  createCanonicalizerFailClosedReconciler,
+  type CanonicalizerReconciliationReport,
+  type CanonicalizerReconciliationRequest,
+  type CanonicalizerReconciler
+} from "./reconciliation.js";
+export {
   InMemoryCanonicalStateStore,
   LocalBrokerTransport,
   LocalCanonicalBrokerOutbox,
@@ -118,6 +129,7 @@ export function createCanonicalizerApplication(config = loadCanonicalizerConfig(
       })
     : undefined;
   const telemetry = combineTelemetrySinks(logSink, metrics);
+  const reconciliationToken = reconciliationTokenFromEnv();
   const productionBrokerTransport = config.dependencyMode === "production"
     ? new PayloadRabbitMqTransport({
         url: requiredEnv("NUTSNEWS_CANONICALIZER_RABBITMQ_URL"),
@@ -154,6 +166,10 @@ export function createCanonicalizerApplication(config = loadCanonicalizerConfig(
   const httpServer = createCanonicalizerHttpServer({
     config,
     service,
+    reconciler: createCanonicalizerFailClosedReconciler(SYSTEM_RUNTIME_CLOCK),
+    ...(reconciliationToken === undefined ? {} : {
+      reconciliationToken
+    }),
     ...(metrics === undefined ? {} : {
       metrics
     })
@@ -189,6 +205,14 @@ export function createCanonicalizerApplication(config = loadCanonicalizerConfig(
       await shutdown.trigger("manual");
     }
   };
+}
+
+function reconciliationTokenFromEnv(): string | undefined {
+  const serviceToken = process.env.NUTSNEWS_CANONICALIZER_RECONCILIATION_TOKEN?.trim();
+  const globalToken = process.env.NUTSNEWS_WORKER_UPLIFT_RECONCILIATION_TOKEN?.trim();
+  const token = serviceToken !== undefined && serviceToken.length > 0 ? serviceToken : globalToken;
+
+  return token === undefined || token.length === 0 ? undefined : token;
 }
 
 function combineTelemetrySinks(
