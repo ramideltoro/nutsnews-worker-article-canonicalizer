@@ -7,10 +7,10 @@ The article canonicalizer owns the worker-uplift service boundary that consumes 
 ## Runtime Surfaces
 
 - Contracts: `@ramideltoro/nutsnews-worker-contracts@0.4.0`
-- Runtime: `@ramideltoro/nutsnews-worker-runtime@0.4.0`
+- Runtime: `@ramideltoro/nutsnews-worker-runtime@0.5.0`
 - Input route boundary: `getWorkerRoute("canonicalization")`
 - Downstream publish route boundary: `getWorkerRoute("enrichment")`
-- Health: separate liveness, startup, and readiness probes
+- Health: separate liveness, startup, and readiness probes; readiness requires an active `canonicalization` main-queue consumer
 - Metrics: bounded Prometheus text from the shared runtime sink
 - Shutdown: stop accepting deliveries, wait for in-flight handlers, cancel consumers, close broker lifecycle
 

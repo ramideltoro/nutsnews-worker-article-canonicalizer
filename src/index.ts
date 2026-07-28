@@ -134,7 +134,10 @@ export function createCanonicalizerApplication(config = loadCanonicalizerConfig(
     ? new PayloadRabbitMqTransport({
         url: requiredEnv("NUTSNEWS_CANONICALIZER_RABBITMQ_URL"),
         prefetch: config.prefetch,
-        clock: SYSTEM_RUNTIME_CLOCK
+        clock: SYSTEM_RUNTIME_CLOCK,
+        ...(telemetry === undefined ? {} : {
+          telemetry
+        })
       })
     : undefined;
   const baseDependencies = createLocalCanonicalizerDependencies({

@@ -3,6 +3,7 @@ import {
 } from "@ramideltoro/nutsnews-worker-contracts";
 import {
   createBrokerLifecycle,
+  createBrokerConsumerReadinessCheck,
   createRuntimeHealthProbeSet,
   createRuntimeInFlightDrainController,
   createRuntimeMessageProcessor,
@@ -115,6 +116,7 @@ export function createCanonicalizerService(options: CanonicalizerServiceOptions)
         ],
         readinessChecks: [
           brokerReadinessCheck(broker),
+          createBrokerConsumerReadinessCheck(broker, "canonicalization"),
           dependencyReadinessCheck("canonical-state", options.dependencies.stateStore),
           dependencyReadinessCheck("database-transactions", options.dependencies.transactionRunner),
           dependencyReadinessCheck("broker-outbox", options.dependencies.brokerOutbox),
