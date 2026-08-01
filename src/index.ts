@@ -17,6 +17,7 @@ import type { CanonicalizerDependencies } from "./dependencies.js";
 import { createCanonicalizerHttpServer } from "./http.js";
 import { createCanonicalizationPrometheusTelemetrySink } from "./metrics.js";
 import { PayloadRabbitMqTransport } from "./rabbitmq-transport.js";
+import { createProductionCanonicalizerDurableAdapters } from "./production.js";
 import {
   createCanonicalizerFailClosedReconciler
 } from "./reconciliation.js";
@@ -91,6 +92,12 @@ export {
   PayloadRabbitMqTransport
 } from "./rabbitmq-transport.js";
 export {
+  PostgresCanonicalBrokerOutbox,
+  PostgresCanonicalStateStore,
+  PostgresCanonicalTransactionRunner,
+  createProductionCanonicalizerDurableAdapters
+} from "./production.js";
+export {
   CANONICALIZER_RECONCILIATION_CONFIRMATION,
   CANONICALIZER_RECONCILIATION_PATH,
   createCanonicalizerFailClosedReconciler,
@@ -125,7 +132,7 @@ export interface CanonicalizerApplication {
 
 export function createCanonicalizerApplication(config = loadCanonicalizerConfig()): CanonicalizerApplication {
   const adapterMode: CanonicalizerDependencies["adapterMode"] = config.dependencyMode === "production"
-    ? "mixed"
+    ? "production"
     : "test";
   const identity = {
     service: "canonicalizer",
@@ -166,15 +173,30 @@ export function createCanonicalizerApplication(config = loadCanonicalizerConfig(
         })
       })
     : undefined;
-  const baseDependencies: CanonicalizerDependencies = {
-    ...createLocalCanonicalizerDependencies({
+  const productionDurableAdapters = config.dependencyMode === "production"
+    ? createProductionCanonicalizerDurableAdapters({
+        databaseUrl: requiredEnv("NUTSNEWS_CANONICALIZER_DATABASE_URL"),
+        applicationName: config.serviceName,
+        maxConnections: Math.max(3, config.concurrency + 2),
+        timeoutMs: config.startupTimeoutMs
+      })
+    : undefined;
+  const localDependencies = createLocalCanonicalizerDependencies({
       clock: SYSTEM_RUNTIME_CLOCK,
       ...(productionBrokerTransport === undefined ? {} : {
         brokerTransport: productionBrokerTransport
       })
-    }),
-    adapterMode
-  };
+    });
+  const baseDependencies: CanonicalizerDependencies = productionDurableAdapters === undefined
+    ? {
+        ...localDependencies,
+        adapterMode
+      }
+    : {
+        ...localDependencies,
+        ...productionDurableAdapters,
+        adapterMode
+      };
   const dependencies = {
     ...baseDependencies,
     workHandler: createCanonicalizationWorkHandler({
@@ -213,6 +235,9 @@ export function createCanonicalizerApplication(config = loadCanonicalizerConfig(
       },
       async () => {
         await service.stop();
+      },
+      async () => {
+        await productionDurableAdapters?.close();
       }
     ],
     signalSource: process,
