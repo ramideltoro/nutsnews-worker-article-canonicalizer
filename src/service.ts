@@ -186,6 +186,7 @@ export function createCanonicalizerService(options: CanonicalizerServiceOptions)
           cancel: async () => {
             await brokerConsumer.cancel();
             setReadinessUnhealthy(options.metrics);
+            await refreshReadinessAfterConsumerLoss(options.metrics);
           }
         };
       } else {
@@ -237,6 +238,10 @@ export function createCanonicalizerService(options: CanonicalizerServiceOptions)
     }
   } satisfies CanonicalizerService;
 
+  registerReadinessEvaluator(options.metrics, async () => {
+    await service.health.readiness();
+  });
+
   return service;
 }
 
@@ -244,7 +249,15 @@ function productionAdaptersAvailable(
   config: CanonicalizerConfig,
   dependencies: CanonicalizerDependencies
 ): boolean {
+  if (isProductionEnvironment(config.environment) && config.dependencyMode !== "production") {
+    return false;
+  }
+
   return config.dependencyMode !== "production" || dependencies.adapterMode === "production";
+}
+
+function isProductionEnvironment(environment: string): boolean {
+  return environment.trim().toLowerCase() === "production";
 }
 
 function setStartupComplete(metrics: CanonicalizationMetricsSink | undefined, started: boolean): void {
@@ -261,6 +274,25 @@ function setReadinessUnhealthy(metrics: CanonicalizationMetricsSink | undefined)
       metrics.setReadinessUnhealthy();
     }
   });
+}
+
+function registerReadinessEvaluator(
+  metrics: CanonicalizationMetricsSink | undefined,
+  evaluate: () => void | Promise<void>
+): void {
+  invokeMetricSafely(() => {
+    if (isCanonicalizationMetrics(metrics)) {
+      metrics.setReadinessEvaluator(evaluate);
+    }
+  });
+}
+
+async function refreshReadinessAfterConsumerLoss(
+  metrics: CanonicalizationMetricsSink | undefined
+): Promise<void> {
+  if (isCanonicalizationMetrics(metrics)) {
+    await metrics.refreshReadinessAfterConsumerLoss();
+  }
 }
 
 function setInFlight(
@@ -290,7 +322,11 @@ function isCanonicalizationMetrics(
     && "setStartupComplete" in metrics
     && typeof metrics.setStartupComplete === "function"
     && "setReadinessUnhealthy" in metrics
-    && typeof metrics.setReadinessUnhealthy === "function";
+    && typeof metrics.setReadinessUnhealthy === "function"
+    && "setReadinessEvaluator" in metrics
+    && typeof metrics.setReadinessEvaluator === "function"
+    && "refreshReadinessAfterConsumerLoss" in metrics
+    && typeof metrics.refreshReadinessAfterConsumerLoss === "function";
 }
 
 class CanonicalizerStateStoreError extends Error {
@@ -564,6 +600,17 @@ function productionAdapterReadinessCheck(
     name: "production-adapters",
     critical: true,
     check: () => {
+      if (isProductionEnvironment(config.environment) && config.dependencyMode !== "production") {
+        return {
+          status: "unhealthy",
+          details: {
+            mode: config.dependencyMode,
+            reason: "production-environment-mode-mismatch",
+            adapterMode: dependencies.adapterMode
+          }
+        };
+      }
+
       if (config.dependencyMode !== "production") {
         return {
           status: "ok",

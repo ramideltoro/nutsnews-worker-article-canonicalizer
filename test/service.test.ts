@@ -175,7 +175,7 @@ describe("createCanonicalizerService", () => {
     const config = loadCanonicalizerConfig({
       NUTSNEWS_CANONICALIZER_DATABASE_URL: "postgres://example.invalid/worker",
       NUTSNEWS_CANONICALIZER_DEPENDENCY_MODE: "production",
-      NUTSNEWS_CANONICALIZER_BUILD_REVISION: "0123456789abcdef",
+      NUTSNEWS_CANONICALIZER_BUILD_REVISION: "0123456789abcdef0123456789abcdef01234567",
       NUTSNEWS_CANONICALIZER_HTTP_PORT: "0",
       NUTSNEWS_CANONICALIZER_RABBITMQ_URL: "amqp://example.invalid",
       NUTSNEWS_CANONICALIZER_TELEMETRY_LOGS: "silent"
@@ -207,6 +207,38 @@ describe("createCanonicalizerService", () => {
       }
     });
     expect(readiness.checks.some((check) => check.name === "deployment-ownership")).toBe(false);
+
+    await service.stop();
+  });
+
+  it("defensively refuses a consumer when production environment and dependency mode disagree", async () => {
+    const localConfig = loadCanonicalizerConfig({
+      NUTSNEWS_CANONICALIZER_HTTP_PORT: "0",
+      NUTSNEWS_CANONICALIZER_TELEMETRY_LOGS: "silent"
+    });
+    const config = {
+      ...localConfig,
+      environment: " Production "
+    };
+    const dependencies = createLocalCanonicalizerDependencies();
+    const service = createCanonicalizerService({
+      config,
+      dependencies
+    });
+
+    await service.start();
+
+    expect(service.consumer).toBeUndefined();
+    const readiness = await service.health.readiness();
+    expect(readiness.status).toBe("unhealthy");
+    expect(readiness.checks.find((check) => check.name === "production-adapters")).toMatchObject({
+      status: "unhealthy",
+      details: {
+        mode: "test",
+        reason: "production-environment-mode-mismatch",
+        adapterMode: "test"
+      }
+    });
 
     await service.stop();
   });

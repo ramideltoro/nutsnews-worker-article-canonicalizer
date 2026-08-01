@@ -49,7 +49,7 @@ describe("loadCanonicalizerConfig", () => {
       expect(configError.issues).toEqual([
         "NUTSNEWS_CANONICALIZER_DATABASE_URL is required when NUTSNEWS_CANONICALIZER_DEPENDENCY_MODE=production.",
         "NUTSNEWS_CANONICALIZER_RABBITMQ_URL is required when NUTSNEWS_CANONICALIZER_DEPENDENCY_MODE=production.",
-        "NUTSNEWS_CANONICALIZER_BUILD_REVISION must identify an immutable build when NUTSNEWS_CANONICALIZER_DEPENDENCY_MODE=production."
+        "NUTSNEWS_CANONICALIZER_BUILD_REVISION must be an exact lowercase 40-character Git SHA when NUTSNEWS_CANONICALIZER_DEPENDENCY_MODE=production."
       ]);
       expect(configError.message).not.toContain("postgres://");
       expect(configError.message).not.toContain("amqp://");
@@ -65,10 +65,16 @@ describe("loadCanonicalizerConfig", () => {
     })).toThrow(CanonicalizerConfigError);
   });
 
+  it("requires production dependency mode for the production environment", () => {
+    expect(() => loadCanonicalizerConfig({
+      NUTSNEWS_ENVIRONMENT: "  Production  "
+    })).toThrow("NUTSNEWS_CANONICALIZER_DEPENDENCY_MODE must be production when NUTSNEWS_ENVIRONMENT=production.");
+  });
+
   it("accepts explicit production dependency presence without retaining values", () => {
     const config = loadCanonicalizerConfig({
       NUTSNEWS_CANONICALIZER_DEPENDENCY_MODE: "production",
-      NUTSNEWS_CANONICALIZER_BUILD_REVISION: "0123456789abcdef",
+      NUTSNEWS_CANONICALIZER_BUILD_REVISION: "0123456789abcdef0123456789abcdef01234567",
       NUTSNEWS_CANONICALIZER_DATABASE_URL: "postgres://example.invalid/worker",
       NUTSNEWS_CANONICALIZER_RABBITMQ_URL: "amqp://example.invalid",
       NUTSNEWS_CANONICALIZER_TELEMETRY_LOGS: "silent"
@@ -81,7 +87,7 @@ describe("loadCanonicalizerConfig", () => {
     expect(JSON.stringify(config)).not.toContain("postgres://example.invalid");
     expect(JSON.stringify(config)).not.toContain("amqp://example.invalid");
     expect(config).toMatchObject({
-      buildRevision: "0123456789abcdef",
+      buildRevision: "0123456789abcdef0123456789abcdef01234567",
       deploymentMode: "shadow",
       expectedActive: false
     });
@@ -96,7 +102,25 @@ describe("loadCanonicalizerConfig", () => {
     })).toThrow(CanonicalizerConfigError);
 
     expect(() => loadCanonicalizerConfig({
+      NUTSNEWS_CANONICALIZER_DEPENDENCY_MODE: "production",
+      NUTSNEWS_CANONICALIZER_BUILD_REVISION: "0123456789ABCDEF0123456789ABCDEF01234567",
+      NUTSNEWS_CANONICALIZER_DATABASE_URL: "postgres://example.invalid/worker",
+      NUTSNEWS_CANONICALIZER_RABBITMQ_URL: "amqp://example.invalid"
+    })).toThrow("NUTSNEWS_CANONICALIZER_BUILD_REVISION must be an exact lowercase 40-character Git SHA");
+
+    expect(() => loadCanonicalizerConfig({
+      NUTSNEWS_CANONICALIZER_DEPENDENCY_MODE: "production",
+      NUTSNEWS_CANONICALIZER_BUILD_REVISION: "0123456789abcdef",
+      NUTSNEWS_CANONICALIZER_DATABASE_URL: "postgres://example.invalid/worker",
+      NUTSNEWS_CANONICALIZER_RABBITMQ_URL: "amqp://example.invalid"
+    })).toThrow("NUTSNEWS_CANONICALIZER_BUILD_REVISION must be an exact lowercase 40-character Git SHA");
+
+    expect(() => loadCanonicalizerConfig({
       NUTSNEWS_CANONICALIZER_BUILD_REVISION: "revision with spaces"
     })).toThrow(CanonicalizerConfigError);
+
+    expect(loadCanonicalizerConfig({
+      NUTSNEWS_CANONICALIZER_BUILD_REVISION: "local-test-revision"
+    }).buildRevision).toBe("local-test-revision");
   });
 });

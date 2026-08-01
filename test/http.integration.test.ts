@@ -109,15 +109,18 @@ describe("canonicalizer HTTP endpoints", () => {
     expect(metricsResponse.status).toBe(200);
     const metricsBody = await metricsResponse.text();
     expect(metricsBody).toContain("nutsnews_worker_messages_total");
-    expect(metricsBody).toContain('nutsnews_worker_uplift_stage_events_total{environment="local",service="canonicalization",outcome="success"} 1');
-    expect(metricsBody).toContain('nutsnews_worker_uplift_stage_events_total{environment="local",service="canonicalization",outcome="failure"} 0');
-    expect(metricsBody).toContain('nutsnews_worker_uplift_stage_latency_seconds_bucket{environment="local",service="canonicalization",le="30"} 1');
-    expect(metricsBody).toContain('nutsnews_worker_build_info{environment="local",service="nutsnews-worker-article-canonicalizer",version="0.1.0",revision="test-revision"} 1');
-    expect(metricsBody).toContain('nutsnews_worker_deployment_info{environment="local",service="nutsnews-worker-article-canonicalizer",deployment="shadow",adapter="in_memory"} 1');
+    expect(metricsBody).toContain('nutsnews_worker_uplift_stage_events_total{environment="local",service="canonicalizer",outcome="success"} 1');
+    expect(metricsBody).toContain('nutsnews_worker_uplift_stage_events_total{environment="local",service="canonicalizer",outcome="failure"} 0');
+    expect(metricsBody).toContain('nutsnews_worker_uplift_stage_latency_seconds_bucket{environment="local",service="canonicalizer",le="30"} 1');
+    expect(metricsBody).toContain('nutsnews_worker_build_info{environment="local",service="canonicalizer",version="0.1.0",revision="test-revision"} 1');
+    expect(metricsBody).toContain('nutsnews_worker_deployment_info{environment="local",service="canonicalizer",deployment="shadow",adapter="in_memory"} 1');
     expect(metricsBody).toContain('nutsnews_worker_expected_active{environment="local",service="canonicalizer"} 0');
-    expect(metricsBody).toContain('nutsnews_worker_health_probe{environment="local",service="canonicalization",probe="liveness",outcome="ok"} 1');
-    expect(metricsBody).toContain('nutsnews_worker_health_probe{environment="local",service="canonicalization",probe="startup",outcome="ok"} 1');
-    expect(metricsBody).toContain('nutsnews_worker_health_probe{environment="local",service="canonicalization",probe="readiness",outcome="ok"} 1');
+    expect(metricsBody).toContain('nutsnews_worker_health_probe{environment="local",service="canonicalizer",probe="liveness",outcome="ok"} 1');
+    expect(metricsBody).toContain('nutsnews_worker_health_probe{environment="local",service="canonicalizer",probe="startup",outcome="ok"} 1');
+    expect(metricsBody).toContain('nutsnews_worker_health_probe{environment="local",service="canonicalizer",probe="readiness",outcome="ok"} 1');
+    expect(metricsBody).toContain(`nutsnews_worker_health_check{environment="local",host="${config.host}",service="canonicalizer",version="0.1.0",outcome="ok",probe="readiness",check="rabbitmq-consumer"} 1`);
+    expect(metricsBody).toContain(`nutsnews_worker_health_check_duration_seconds_count{environment="local",host="${config.host}",service="canonicalizer",version="0.1.0",probe="readiness",check="rabbitmq-consumer"} 1`);
+    expect(metricsBody).not.toContain('check="other"');
     expect(metricsBody).not.toContain("nutsnews_worker_dependency_duration_ms");
 
     const schemaResponse = await fetch(activeServer.url("/config-schema"));

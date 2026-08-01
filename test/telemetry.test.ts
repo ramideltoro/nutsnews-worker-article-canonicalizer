@@ -74,7 +74,7 @@ describe("canonicalization lifecycle telemetry", () => {
     expect(sampleValue(beforeTraffic, "nutsnews_worker_uplift_stage_latency_seconds_count")).toBe(0);
 
     const initialSeries = canonicalStageSeries(beforeTraffic);
-    expect(initialSeries).toHaveLength(22);
+    expect(initialSeries).toHaveLength(24);
 
     await context.metrics.emit({
       name: "runtime.message.accepted",
@@ -235,11 +235,16 @@ describe("canonicalization lifecycle telemetry", () => {
     })).toBe(6);
     expect(sampleValue(output, "nutsnews_worker_uplift_stage_latency_seconds_sum")).toBe(1);
     expect(sampleValue(output, "nutsnews_worker_uplift_stage_latency_seconds_count")).toBe(6);
-    expect(output).toContain('nutsnews_worker_build_info{environment="test",service="nutsnews-worker-article-canonicalizer",version="0.1.0",revision="telemetry-test-revision"} 1');
-    expect(output).toContain('nutsnews_worker_deployment_info{environment="test",service="nutsnews-worker-article-canonicalizer",deployment="shadow",adapter="in_memory"} 1');
+    expect(output).toContain('nutsnews_worker_build_info{environment="test",service="canonicalizer",version="0.1.0",revision="telemetry-test-revision"} 1');
+    expect(output).toContain('nutsnews_worker_deployment_info{environment="test",service="canonicalizer",deployment="shadow",adapter="in_memory"} 1');
     expect(output).toContain('nutsnews_worker_expected_active{environment="test",service="canonicalizer"} 0');
+    expect(sampleValue(output, "nutsnews_worker_last_success_timestamp_seconds", {
+      service: "canonicalizer"
+    })).toBe(Math.floor(Date.parse("2026-07-23T00:00:00.250Z") / 1_000));
     expect(CANONICALIZATION_STAGE_LATENCY_BUCKETS_SECONDS).toEqual([
+      0.005,
       0.01,
+      0.025,
       0.05,
       0.1,
       0.25,
@@ -299,8 +304,8 @@ describe("canonicalization lifecycle telemetry", () => {
     });
     const output = metrics.collect();
 
-    expect(output).toContain('nutsnews_worker_build_info{environment="production",service="nutsnews-worker-article-canonicalizer",version="0.1.0",revision="0123456789abcdef0123456789abcdef01234567"} 1');
-    expect(output).toContain('nutsnews_worker_deployment_info{environment="production",service="nutsnews-worker-article-canonicalizer",deployment="shadow",adapter="mixed"} 1');
+    expect(output).toContain('nutsnews_worker_build_info{environment="production",service="canonicalizer",version="0.1.0",revision="0123456789abcdef0123456789abcdef01234567"} 1');
+    expect(output).toContain('nutsnews_worker_deployment_info{environment="production",service="canonicalizer",deployment="shadow",adapter="mixed"} 1');
     expect(output).toContain('nutsnews_worker_expected_active{environment="production",service="canonicalizer"} 0');
     expect(output).not.toContain('revision="unknown"');
     expect(output).not.toContain('deployment="unknown"');
@@ -309,24 +314,78 @@ describe("canonicalization lifecycle telemetry", () => {
 
   it("reports distinct probe health and turns readiness unhealthy after consumer cancellation", async () => {
     const context = createTelemetryContext();
+    let consumerState: "inactive" | "active" | "channel-dropped" = "inactive";
+    const originalConsume = context.broker.consume.bind(context.broker);
+    Object.defineProperty(context.broker, "consumerStatus", {
+      configurable: true,
+      value: (stage: "canonicalization") => ({
+        stage,
+        queue: "nutsnews.worker.canonicalization.v1",
+        state: consumerState,
+        activeConsumers: consumerState === "active" ? 1 : 0,
+        reason: consumerState,
+        changedAt: "2026-07-23T00:00:00.000Z"
+      })
+    });
+    vi.spyOn(context.broker, "consume").mockImplementation(async (stage, handler) => {
+      const handle = await originalConsume(stage, handler);
+      consumerState = "active";
+
+      return {
+        ...handle,
+        cancel: async () => {
+          await handle.cancel();
+          consumerState = "channel-dropped";
+          await context.metrics.emit({
+            name: "runtime.broker.consumer_state_changed",
+            level: "error",
+            at: "2026-07-23T00:00:01.000Z",
+            stage: "canonicalization",
+            queue: "nutsnews.worker.canonicalization.v1",
+            outcome: "channel-dropped"
+          });
+        }
+      };
+    });
 
     const initialOutput = context.metrics.collect();
-    expect(initialOutput).toContain('nutsnews_worker_health_probe{environment="test",service="canonicalization",probe="liveness",outcome="ok"} 1');
-    expect(initialOutput).toContain('nutsnews_worker_health_probe{environment="test",service="canonicalization",probe="startup",outcome="unhealthy"} 1');
-    expect(initialOutput).toContain('nutsnews_worker_health_probe{environment="test",service="canonicalization",probe="readiness",outcome="unhealthy"} 1');
+    expect(initialOutput).toContain('nutsnews_worker_health_probe{environment="test",service="canonicalizer",probe="liveness",outcome="ok"} 1');
+    expect(initialOutput).toContain('nutsnews_worker_health_probe{environment="test",service="canonicalizer",probe="startup",outcome="unhealthy"} 1');
+    expect(initialOutput).toContain('nutsnews_worker_health_probe{environment="test",service="canonicalizer",probe="readiness",outcome="unhealthy"} 1');
 
     await context.service.start();
-    expect(context.metrics.collect()).toContain('nutsnews_worker_health_probe{environment="test",service="canonicalization",probe="startup",outcome="ok"} 1');
-    await context.service.health.readiness();
+    expect(context.metrics.collect()).toContain('nutsnews_worker_health_probe{environment="test",service="canonicalizer",probe="startup",outcome="ok"} 1');
+    expect((await context.service.health.readiness()).status).toBe("ok");
+    const beforeCancellation = context.metrics.collect();
+    expect(beforeCancellation).toContain('nutsnews_worker_health_check{environment="test",host="canonicalization-test",service="canonicalizer",version="0.1.0",outcome="ok",probe="readiness",check="rabbitmq-consumer"} 1');
+    const healthCheckCountBeforeCancellation = sampleValue(beforeCancellation, "nutsnews_worker_health_check_duration_seconds_count", {
+      check: "rabbitmq-consumer",
+      probe: "readiness"
+    });
+    expect(healthCheckCountBeforeCancellation).toBe(1);
     await context.service.consumer?.cancel();
 
-    expect((await context.service.health.readiness()).status).toBe("unhealthy");
-
     const output = context.metrics.collect();
-    expect(output).toContain('nutsnews_worker_health_probe{environment="test",service="canonicalization",probe="liveness",outcome="ok"} 1');
-    expect(output).toContain('nutsnews_worker_health_probe{environment="test",service="canonicalization",probe="startup",outcome="ok"} 1');
-    expect(output).toContain('nutsnews_worker_health_probe{environment="test",service="canonicalization",probe="readiness",outcome="unhealthy"} 1');
-    expect(output).toContain('nutsnews_worker_health_probe{environment="test",service="canonicalization",probe="readiness",outcome="ok"} 0');
+    expect(output).toContain('nutsnews_worker_health_probe{environment="test",service="canonicalizer",probe="liveness",outcome="ok"} 1');
+    expect(output).toContain('nutsnews_worker_health_probe{environment="test",service="canonicalizer",probe="startup",outcome="ok"} 1');
+    expect(output).toContain('nutsnews_worker_health_probe{environment="test",service="canonicalizer",probe="readiness",outcome="unhealthy"} 1');
+    expect(output).toContain('nutsnews_worker_health_probe{environment="test",service="canonicalizer",probe="readiness",outcome="ok"} 0');
+    expect(output).toContain('nutsnews_worker_health_check{environment="test",host="canonicalization-test",service="canonicalizer",version="0.1.0",outcome="unhealthy",probe="readiness",check="rabbitmq-consumer"} 1');
+    const healthCheckCountAfterCancellation = sampleValue(output, "nutsnews_worker_health_check_duration_seconds_count", {
+      check: "rabbitmq-consumer",
+      probe: "readiness"
+    });
+    expect(healthCheckCountAfterCancellation - healthCheckCountBeforeCancellation).toBe(1);
+    expect(output).not.toContain('check="other"');
+
+    for (const family of [
+      "nutsnews_worker_health_probe",
+      "nutsnews_worker_health_check",
+      "nutsnews_worker_health_check_duration_seconds"
+    ]) {
+      expect(output.split("\n").filter((line) => line.startsWith(`# HELP ${family} `))).toHaveLength(1);
+      expect(output.split("\n").filter((line) => line.startsWith(`# TYPE ${family} `))).toHaveLength(1);
+    }
 
     await context.service.stop();
   });

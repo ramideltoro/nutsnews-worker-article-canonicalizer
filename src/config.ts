@@ -17,7 +17,7 @@ export interface CanonicalizerConfigVariable {
 
 export const CANONICALIZER_CONFIG_SCHEMA = [
   variable("NUTSNEWS_ENVIRONMENT", "Runtime environment label for logs and metrics.", false, false, "local"),
-  variable("NUTSNEWS_CANONICALIZER_BUILD_REVISION", "Immutable source revision embedded in the service image.", true, false, "unknown"),
+  variable("NUTSNEWS_CANONICALIZER_BUILD_REVISION", "Immutable source revision; production requires an exact lowercase 40-character Git SHA.", true, false, "unknown"),
   variable("NUTSNEWS_CANONICALIZER_HTTP_HOST", "Health and metrics bind host.", false, false, "0.0.0.0"),
   variable("NUTSNEWS_CANONICALIZER_HTTP_PORT", "Health and metrics bind port.", false, false, "8080"),
   variable("NUTSNEWS_CANONICALIZER_DEPENDENCY_MODE", "Use test dependencies locally or require production dependency presence.", false, false, "test"),
@@ -70,6 +70,7 @@ export class CanonicalizerConfigError extends Error {
 
 export function loadCanonicalizerConfig(env: NodeJS.ProcessEnv = process.env): CanonicalizerConfig {
   const issues: string[] = [];
+  const environment = nonEmpty(env.NUTSNEWS_ENVIRONMENT, "local");
   const dependencyMode = parseDependencyMode(env.NUTSNEWS_CANONICALIZER_DEPENDENCY_MODE, issues);
   const buildRevision = parseBuildRevision(env.NUTSNEWS_CANONICALIZER_BUILD_REVISION, issues);
   const dependencies = {
@@ -77,12 +78,16 @@ export function loadCanonicalizerConfig(env: NodeJS.ProcessEnv = process.env): C
     rabbitmqConfigured: hasValue(env.NUTSNEWS_CANONICALIZER_RABBITMQ_URL)
   };
 
+  if (isProductionEnvironment(environment) && dependencyMode !== "production") {
+    issues.push("NUTSNEWS_CANONICALIZER_DEPENDENCY_MODE must be production when NUTSNEWS_ENVIRONMENT=production.");
+  }
+
   if (dependencyMode === "production") {
     requireConfigured("NUTSNEWS_CANONICALIZER_DATABASE_URL", dependencies.databaseConfigured, issues);
     requireConfigured("NUTSNEWS_CANONICALIZER_RABBITMQ_URL", dependencies.rabbitmqConfigured, issues);
 
-    if (buildRevision === "unknown") {
-      issues.push("NUTSNEWS_CANONICALIZER_BUILD_REVISION must identify an immutable build when NUTSNEWS_CANONICALIZER_DEPENDENCY_MODE=production.");
+    if (!/^[0-9a-f]{40}$/u.test(buildRevision)) {
+      issues.push("NUTSNEWS_CANONICALIZER_BUILD_REVISION must be an exact lowercase 40-character Git SHA when NUTSNEWS_CANONICALIZER_DEPENDENCY_MODE=production.");
     }
   }
 
@@ -92,7 +97,7 @@ export function loadCanonicalizerConfig(env: NodeJS.ProcessEnv = process.env): C
   const config: CanonicalizerConfig = {
     serviceName: CANONICALIZER_SERVICE_NAME,
     serviceVersion: CANONICALIZER_SERVICE_VERSION,
-    environment: nonEmpty(env.NUTSNEWS_ENVIRONMENT, "local"),
+    environment,
     host: nonEmpty(env.HOSTNAME, os.hostname()),
     buildRevision,
     http: {
@@ -157,6 +162,10 @@ function nonEmpty(value: string | undefined, fallback: string): string {
 
 function hasValue(value: string | undefined): boolean {
   return value !== undefined && value.trim().length > 0;
+}
+
+function isProductionEnvironment(environment: string): boolean {
+  return environment.trim().toLowerCase() === "production";
 }
 
 function parseBuildRevision(value: string | undefined, issues: string[]): string {

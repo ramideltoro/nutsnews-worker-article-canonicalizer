@@ -12,7 +12,9 @@ import type {
 } from "./dependencies.js";
 
 export const CANONICALIZATION_STAGE_LATENCY_BUCKETS_SECONDS = [
+  0.005,
   0.01,
+  0.025,
   0.05,
   0.1,
   0.25,
@@ -49,6 +51,8 @@ export interface CanonicalizationMetricsSink {
 export interface CanonicalizationPrometheusTelemetrySink extends CanonicalizationMetricsSink {
   setStartupComplete(started: boolean): void;
   setReadinessUnhealthy(): void;
+  setReadinessEvaluator(evaluate: () => void | Promise<void>): void;
+  refreshReadinessAfterConsumerLoss(): Promise<void>;
 }
 
 export interface CanonicalizationPrometheusTelemetrySinkOptions extends PrometheusRuntimeTelemetrySinkOptions {
@@ -71,6 +75,25 @@ const HEALTH_OUTCOMES = [
   "degraded",
   "unhealthy"
 ] as const;
+const CANONICALIZER_RUNTIME_HEALTH_CHECKS = [
+  "process",
+  "service-started",
+  "broker-lifecycle",
+  "rabbitmq-consumer",
+  "canonical-state",
+  "database-transactions",
+  "broker-outbox",
+  "production-adapters"
+] as const;
+const CANONICALIZER_RUNTIME_DEPENDENCIES = [
+  "canonical-state",
+  "canonicalization-work-handler",
+  "local-canonicalizer-work-handler",
+  "canonicalizer-shell",
+  "database-transactions",
+  "broker-outbox",
+  "rabbitmq"
+] as const;
 const MAX_LABEL_LENGTH = 96;
 
 interface HistogramState {
@@ -86,13 +109,19 @@ export function createCanonicalizationPrometheusTelemetrySink(
   const runtime = createPrometheusRuntimeTelemetrySink({
     identity: {
       ...options.identity,
+      service: CANONICALIZER_IDENTITY_SERVICE,
       revision: options.buildRevision,
       deployment: options.deployment,
       adapter
     },
     ...(options.defaultQueue === undefined ? {} : {
       defaultQueue: options.defaultQueue
-    })
+    }),
+    expectedActive: options.expectedActive,
+    cardinality: {
+      dependencies: CANONICALIZER_RUNTIME_DEPENDENCIES,
+      healthChecks: CANONICALIZER_RUNTIME_HEALTH_CHECKS
+    }
   });
   const environment = metricLabelValue(options.identity.environment);
   const counters = new Map<CanonicalizationStageOutcome, number>(
@@ -120,18 +149,57 @@ export function createCanonicalizationPrometheusTelemetrySink(
       "unhealthy"
     ]
   ]);
+  let lastSuccessTimestampSeconds: number | undefined;
+  let readinessEvaluator: (() => void | Promise<void>) | undefined;
+  let consumerLossReadinessRefresh: Promise<void> | undefined;
+
+  const refreshReadinessAfterConsumerLoss = (): Promise<void> => {
+    if (readinessEvaluator === undefined) {
+      return Promise.resolve();
+    }
+
+    consumerLossReadinessRefresh ??= Promise.resolve()
+      .then(() => readinessEvaluator?.())
+      .then(() => undefined)
+      .catch(() => undefined);
+
+    return consumerLossReadinessRefresh;
+  };
 
   return {
     allowedLabels: runtime.allowedLabels,
     async emit(event: RuntimeTelemetryEvent): Promise<void> {
-      // This wrapper owns the bounded health-probe family, so forwarding health
-      // events to Runtime 1 would expose duplicate metadata and samples. Keep an
-      // unmeasured dependency event out of the runtime histogram as well.
-      if (
-        event.name !== "runtime.health.evaluated"
-        && (event.name !== "runtime.dependency.observed" || measuredDuration(event) !== undefined)
-      ) {
+      const healthProbe = observedHealthProbe(event);
+
+      if (healthProbe !== undefined) {
+        health.set(healthProbe.probe, healthProbe.outcome);
+      }
+
+      if (consumerStateInvalidatesReadiness(event)) {
+        health.set("readiness", "unhealthy");
+      } else if (consumerStateIsActive(event)) {
+        consumerLossReadinessRefresh = undefined;
+      }
+
+      const successfulAt = successfulEventTimestampSeconds(event);
+
+      if (successfulAt !== undefined
+        && (lastSuccessTimestampSeconds === undefined || successfulAt > lastSuccessTimestampSeconds)) {
+        lastSuccessTimestampSeconds = successfulAt;
+        runtime.setLastSuccessTimestamp(successfulAt);
+      }
+
+      // Runtime 1 owns evaluated probe/check metrics. The local probe family is
+      // retained for synchronous lifecycle transitions, so collect() removes
+      // Runtime's duplicate probe family while preserving Runtime-owned
+      // per-check gauges and histograms. Keep unmeasured dependency events out
+      // of the runtime histogram.
+      if (event.name !== "runtime.dependency.observed" || measuredDuration(event) !== undefined) {
         await runtime.emit(event);
+      }
+
+      if (consumerStateInvalidatesReadiness(event)) {
+        await refreshReadinessAfterConsumerLoss();
       }
 
       const outcome = canonicalizationStageOutcome(event);
@@ -145,19 +213,16 @@ export function createCanonicalizationPrometheusTelemetrySink(
         }
       }
 
-      const healthProbe = observedHealthProbe(event);
-
-      if (healthProbe !== undefined) {
-        health.set(healthProbe.probe, healthProbe.outcome);
-      }
     },
     collect(): string {
-      const runtimeOutput = runtime.collect().trimEnd();
+      const runtimeOutput = withoutMetricFamily(
+        runtime.collect().trimEnd(),
+        "nutsnews_worker_health_probe"
+      );
 
       return `${[
         runtimeOutput,
         collectBuildIdentityMetrics(options, environment, adapter, runtimeOutput),
-        collectExpectedActiveMetric(environment, options.expectedActive, runtimeOutput),
         collectHealthMetrics(environment, health),
         collectStageMetrics(environment, counters, histogram)
       ].filter((output) => output.length > 0).join("\n")}\n`;
@@ -173,7 +238,12 @@ export function createCanonicalizationPrometheusTelemetrySink(
     },
     setReadinessUnhealthy(): void {
       health.set("readiness", "unhealthy");
-    }
+    },
+    setReadinessEvaluator(evaluate): void {
+      readinessEvaluator = evaluate;
+      consumerLossReadinessRefresh = undefined;
+    },
+    refreshReadinessAfterConsumerLoss
   };
 }
 
@@ -191,7 +261,7 @@ function collectBuildIdentityMetrics(
       "# TYPE nutsnews_worker_build_info gauge",
       `nutsnews_worker_build_info${labels({
         environment,
-        service: metricLabelValue(options.identity.service),
+        service: CANONICALIZER_IDENTITY_SERVICE,
         version: metricLabelValue(options.identity.version),
         revision: metricLabelValue(options.buildRevision)
       })} 1`
@@ -204,7 +274,7 @@ function collectBuildIdentityMetrics(
       "# TYPE nutsnews_worker_deployment_info gauge",
       `nutsnews_worker_deployment_info${labels({
         environment,
-        service: metricLabelValue(options.identity.service),
+        service: CANONICALIZER_IDENTITY_SERVICE,
         deployment: metricLabelValue(options.deployment),
         adapter: metricLabelValue(adapter)
       })} 1`
@@ -212,25 +282,6 @@ function collectBuildIdentityMetrics(
   }
 
   return lines.join("\n");
-}
-
-function collectExpectedActiveMetric(
-  environment: string,
-  expectedActive: boolean,
-  runtimeOutput: string
-): string {
-  if (hasMetricFamily(runtimeOutput, "nutsnews_worker_expected_active")) {
-    return "";
-  }
-
-  return [
-    "# HELP nutsnews_worker_expected_active Whether this worker deployment is expected to own active production work.",
-    "# TYPE nutsnews_worker_expected_active gauge",
-    `nutsnews_worker_expected_active${labels({
-      environment,
-      service: CANONICALIZER_IDENTITY_SERVICE
-    })} ${expectedActive ? "1" : "0"}`
-  ].join("\n");
 }
 
 function canonicalMetricAdapter(
@@ -287,7 +338,7 @@ function collectStageMetrics(
   for (const outcome of CANONICALIZATION_STAGE_OUTCOMES) {
     lines.push(`nutsnews_worker_uplift_stage_events_total${labels({
       environment,
-      service: CANONICALIZATION_STAGE_SERVICE,
+      service: CANONICALIZER_IDENTITY_SERVICE,
       outcome
     })} ${formatMetricNumber(counters.get(outcome) ?? 0)}`);
   }
@@ -300,7 +351,7 @@ function collectStageMetrics(
   for (const [index, boundary] of CANONICALIZATION_STAGE_LATENCY_BUCKETS_SECONDS.entries()) {
     lines.push(`nutsnews_worker_uplift_stage_latency_seconds_bucket${labels({
       environment,
-      service: CANONICALIZATION_STAGE_SERVICE,
+      service: CANONICALIZER_IDENTITY_SERVICE,
       le: String(boundary)
     })} ${formatMetricNumber(histogram.buckets[index] ?? 0)}`);
   }
@@ -308,16 +359,16 @@ function collectStageMetrics(
   lines.push(
     `nutsnews_worker_uplift_stage_latency_seconds_bucket${labels({
       environment,
-      service: CANONICALIZATION_STAGE_SERVICE,
+      service: CANONICALIZER_IDENTITY_SERVICE,
       le: "+Inf"
     })} ${formatMetricNumber(histogram.count)}`,
     `nutsnews_worker_uplift_stage_latency_seconds_sum${labels({
       environment,
-      service: CANONICALIZATION_STAGE_SERVICE
+      service: CANONICALIZER_IDENTITY_SERVICE
     })} ${formatMetricNumber(histogram.sum)}`,
     `nutsnews_worker_uplift_stage_latency_seconds_count${labels({
       environment,
-      service: CANONICALIZATION_STAGE_SERVICE
+      service: CANONICALIZER_IDENTITY_SERVICE
     })} ${formatMetricNumber(histogram.count)}`
   );
 
@@ -379,7 +430,7 @@ function collectHealthMetrics(
     for (const outcome of HEALTH_OUTCOMES) {
       lines.push(`nutsnews_worker_health_probe${labels({
         environment,
-        service: CANONICALIZATION_STAGE_SERVICE,
+        service: CANONICALIZER_IDENTITY_SERVICE,
         probe,
         outcome
       })} ${outcome === observed ? "1" : "0"}`);
@@ -387,6 +438,42 @@ function collectHealthMetrics(
   }
 
   return lines.join("\n");
+}
+
+function withoutMetricFamily(output: string, metric: string): string {
+  return output
+    .split("\n")
+    .filter((line) => !line.startsWith(`# HELP ${metric} `)
+      && !line.startsWith(`# TYPE ${metric} `)
+      && !line.startsWith(`${metric}{`)
+      && !line.startsWith(`${metric} `))
+    .join("\n");
+}
+
+function consumerStateInvalidatesReadiness(event: RuntimeTelemetryEvent): boolean {
+  return event.name === "runtime.broker.consumer_state_changed"
+    && event.stage === CANONICALIZATION_STAGE_SERVICE
+    && event.outcome !== "active";
+}
+
+function consumerStateIsActive(event: RuntimeTelemetryEvent): boolean {
+  return event.name === "runtime.broker.consumer_state_changed"
+    && event.stage === CANONICALIZATION_STAGE_SERVICE
+    && event.outcome === "active";
+}
+
+function successfulEventTimestampSeconds(event: RuntimeTelemetryEvent): number | undefined {
+  const outcome = canonicalizationStageOutcome(event);
+
+  if (outcome !== "success" && outcome !== "duplicate") {
+    return undefined;
+  }
+
+  const timestampMs = Date.parse(event.at);
+
+  return Number.isFinite(timestampMs) && timestampMs >= 0
+    ? Math.floor(timestampMs / 1_000)
+    : undefined;
 }
 
 function measuredDuration(event: RuntimeTelemetryEvent): number | undefined {

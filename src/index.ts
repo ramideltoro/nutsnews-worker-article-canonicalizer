@@ -128,10 +128,13 @@ export function createCanonicalizerApplication(config = loadCanonicalizerConfig(
     ? "mixed"
     : "test";
   const identity = {
-    service: config.serviceName,
+    service: "canonicalizer",
     version: config.serviceVersion,
     environment: config.environment,
-    host: config.host
+    host: config.host,
+    revision: config.buildRevision,
+    deployment: config.deploymentMode,
+    adapter: adapterMode === "test" ? "in_memory" as const : adapterMode
   };
   const logSink = config.telemetryLogs === "stdout"
     ? createJsonRuntimeTelemetrySink({
