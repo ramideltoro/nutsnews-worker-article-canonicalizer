@@ -1,7 +1,8 @@
 import type {
   ChannelModel,
   ConfirmChannel,
-  ConsumeMessage
+  ConsumeMessage,
+  SocketOptions
 } from "amqplib";
 import {
   afterEach,
@@ -18,11 +19,15 @@ type CloseHandler = () => void;
 
 interface FakeBroker {
   readonly connections: FakeConnection[];
-  readonly connect: (url: string) => Promise<ChannelModel>;
+  readonly connect: (
+    url: string,
+    socketOptions: Pick<SocketOptions, "timeout">
+  ) => Promise<ChannelModel>;
 }
 
 interface FakeConnection {
   readonly channel: FakeChannel;
+  readonly closeCalls: number;
   emitClose(): void;
   toChannelModel(): ChannelModel;
 }
@@ -49,6 +54,7 @@ describe("RabbitMQ payload transport", () => {
     const transport = new PayloadRabbitMqTransport({
       url: "amqp://canonicalizer:test@example.invalid:5672",
       prefetch: 4,
+      connectTimeoutMs: 1_000,
       clock,
       connect: broker.connect,
       telemetry
@@ -90,6 +96,33 @@ describe("RabbitMQ payload transport", () => {
 
     await transport.close();
   });
+
+  it("closes a connection that resolves after transport shutdown", async () => {
+    const connection = createFakeConnection();
+    const connectionGate = deferred<ChannelModel>();
+    const connect = vi.fn(() => connectionGate.promise);
+    const transport = new PayloadRabbitMqTransport({
+      url: "amqp://canonicalizer:test@example.invalid:5672",
+      prefetch: 4,
+      connectTimeoutMs: 1_000,
+      clock,
+      connect
+    });
+    const startup = transport.connect();
+
+    await Promise.resolve();
+    await transport.close();
+    connectionGate.resolve(connection.toChannelModel());
+
+    await expect(startup).rejects.toThrow("RabbitMQ payload transport is closing.");
+    expect(connect).toHaveBeenCalledWith(
+      "amqp://canonicalizer:test@example.invalid:5672",
+      {
+        timeout: 1_000
+      }
+    );
+    expect(connection.closeCalls).toBe(1);
+  });
 });
 
 function createFakeBroker(): FakeBroker {
@@ -97,8 +130,14 @@ function createFakeBroker(): FakeBroker {
 
   return {
     connections,
-    connect: (url: string): Promise<ChannelModel> => {
+    connect: (
+      url: string,
+      socketOptions: Pick<SocketOptions, "timeout">
+    ): Promise<ChannelModel> => {
       expect(url).toBe("amqp://canonicalizer:test@example.invalid:5672");
+      expect(socketOptions).toEqual({
+        timeout: 1_000
+      });
       const connection = createFakeConnection();
       connections.push(connection);
       return Promise.resolve(connection.toChannelModel());
@@ -109,11 +148,13 @@ function createFakeBroker(): FakeBroker {
 function createFakeConnection(): FakeConnection {
   const channel = createFakeChannel();
   const closeHandlers: CloseHandler[] = [];
+  let closeCalls = 0;
   const connection = {
     createConfirmChannel(): Promise<ConfirmChannel> {
       return Promise.resolve(channel.toConfirmChannel());
     },
     close(): Promise<void> {
+      closeCalls += 1;
       for (const handler of closeHandlers) {
         handler();
       }
@@ -131,6 +172,9 @@ function createFakeConnection(): FakeConnection {
 
   return {
     channel,
+    get closeCalls(): number {
+      return closeCalls;
+    },
     emitClose(): void {
       for (const handler of closeHandlers) {
         handler();
@@ -139,6 +183,21 @@ function createFakeConnection(): FakeConnection {
     toChannelModel(): ChannelModel {
       return connection as unknown as ChannelModel;
     }
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+
+  return {
+    promise,
+    resolve,
+    reject
   };
 }
 

@@ -3,11 +3,9 @@ import { pathToFileURL } from "node:url";
 import { getContractPackageMetadata } from "@ramideltoro/nutsnews-worker-contracts";
 import {
   createJsonRuntimeTelemetrySink,
-  createPrometheusRuntimeTelemetrySink,
   createRuntimeShutdownController,
   getRuntimePackageMetadata,
-  SYSTEM_RUNTIME_CLOCK,
-  type RuntimeTelemetrySink
+  SYSTEM_RUNTIME_CLOCK
 } from "@ramideltoro/nutsnews-worker-runtime";
 
 import {
@@ -15,12 +13,19 @@ import {
   type CanonicalizerConfig
 } from "./config.js";
 import { createCanonicalizationWorkHandler } from "./canonicalization.js";
+import type { CanonicalizerDependencies } from "./dependencies.js";
 import { createCanonicalizerHttpServer } from "./http.js";
+import { createCanonicalizationPrometheusTelemetrySink } from "./metrics.js";
 import { PayloadRabbitMqTransport } from "./rabbitmq-transport.js";
 import {
   createCanonicalizerFailClosedReconciler
 } from "./reconciliation.js";
 import { createCanonicalizerService } from "./service.js";
+import { startCanonicalizerRuntime } from "./startup.js";
+import {
+  combineBestEffortRuntimeTelemetrySinks,
+  createBestEffortRuntimeTelemetryFlusher
+} from "./telemetry.js";
 import { createLocalCanonicalizerDependencies } from "./test-doubles.js";
 
 export {
@@ -54,6 +59,15 @@ export {
   createCanonicalizerHttpServer,
   type CanonicalizerHttpServer
 } from "./http.js";
+export {
+  CANONICALIZATION_STAGE_LATENCY_BUCKETS_SECONDS,
+  CANONICALIZATION_STAGE_OUTCOMES,
+  createCanonicalizationPrometheusTelemetrySink,
+  type CanonicalizationMetricsSink,
+  type CanonicalizationPrometheusTelemetrySink,
+  type CanonicalizationPrometheusTelemetrySinkOptions,
+  type CanonicalizationStageOutcome
+} from "./metrics.js";
 export {
   sha256Hex,
   stableArticleId,
@@ -109,6 +123,9 @@ export interface CanonicalizerApplication {
 }
 
 export function createCanonicalizerApplication(config = loadCanonicalizerConfig()): CanonicalizerApplication {
+  const adapterMode: CanonicalizerDependencies["adapterMode"] = config.dependencyMode === "production"
+    ? "mixed"
+    : "test";
   const identity = {
     service: config.serviceName,
     version: config.serviceVersion,
@@ -124,28 +141,36 @@ export function createCanonicalizerApplication(config = loadCanonicalizerConfig(
       })
     : undefined;
   const metrics = config.metricsEnabled
-    ? createPrometheusRuntimeTelemetrySink({
-        identity
+    ? createCanonicalizationPrometheusTelemetrySink({
+        identity,
+        buildRevision: config.buildRevision,
+        deployment: config.deploymentMode,
+        expectedActive: config.expectedActive,
+        adapter: adapterMode
       })
     : undefined;
-  const telemetry = combineTelemetrySinks(logSink, metrics);
+  const telemetry = combineBestEffortRuntimeTelemetrySinks(logSink, metrics);
   const reconciliationToken = reconciliationTokenFromEnv();
   const productionBrokerTransport = config.dependencyMode === "production"
     ? new PayloadRabbitMqTransport({
         url: requiredEnv("NUTSNEWS_CANONICALIZER_RABBITMQ_URL"),
         prefetch: config.prefetch,
+        connectTimeoutMs: config.startupTimeoutMs,
         clock: SYSTEM_RUNTIME_CLOCK,
         ...(telemetry === undefined ? {} : {
           telemetry
         })
       })
     : undefined;
-  const baseDependencies = createLocalCanonicalizerDependencies({
-    clock: SYSTEM_RUNTIME_CLOCK,
-    ...(productionBrokerTransport === undefined ? {} : {
-      brokerTransport: productionBrokerTransport
-    })
-  });
+  const baseDependencies: CanonicalizerDependencies = {
+    ...createLocalCanonicalizerDependencies({
+      clock: SYSTEM_RUNTIME_CLOCK,
+      ...(productionBrokerTransport === undefined ? {} : {
+        brokerTransport: productionBrokerTransport
+      })
+    }),
+    adapterMode
+  };
   const dependencies = {
     ...baseDependencies,
     workHandler: createCanonicalizationWorkHandler({
@@ -192,7 +217,7 @@ export function createCanonicalizerApplication(config = loadCanonicalizerConfig(
       telemetry
     }),
     ...(logSink === undefined ? {} : {
-      telemetryFlusher: logSink
+      telemetryFlusher: createBestEffortRuntimeTelemetryFlusher(logSink)
     })
   });
 
@@ -200,9 +225,12 @@ export function createCanonicalizerApplication(config = loadCanonicalizerConfig(
     config,
     async start(): Promise<void> {
       assertPackageCompatibility();
-      await service.start();
-      await httpServer.listen();
-      shutdown.start();
+      await startCanonicalizerRuntime({
+        service,
+        httpServer,
+        shutdown,
+        timeoutMs: config.startupTimeoutMs
+      });
     },
     async stop(): Promise<void> {
       await shutdown.trigger("manual");
@@ -216,24 +244,6 @@ function reconciliationTokenFromEnv(): string | undefined {
   const token = serviceToken !== undefined && serviceToken.length > 0 ? serviceToken : globalToken;
 
   return token === undefined || token.length === 0 ? undefined : token;
-}
-
-function combineTelemetrySinks(
-  ...sinks: readonly (RuntimeTelemetrySink | undefined)[]
-): RuntimeTelemetrySink | undefined {
-  const configured = sinks.filter((sink): sink is RuntimeTelemetrySink => sink !== undefined);
-
-  if (configured.length === 0) {
-    return undefined;
-  }
-
-  return {
-    emit: async (event) => {
-      for (const sink of configured) {
-        await sink.emit(event);
-      }
-    }
-  };
 }
 
 export const SUPPORTED_RUNTIME_PACKAGE_VERSION = "0.5.0";

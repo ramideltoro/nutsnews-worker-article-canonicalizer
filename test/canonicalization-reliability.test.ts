@@ -136,7 +136,10 @@ describe("canonicalization reliability proof", () => {
     await context.service.start();
 
     try {
-      await expect(context.broker.deliverCanonicalization(delivery)).rejects.toThrow("crash-before-inbox-insert");
+      await expect(context.broker.deliverCanonicalization(delivery)).resolves.toMatchObject({
+        action: "retry",
+        reason: "idempotency-claim-error"
+      });
       expect(context.stateStore.decisions).toHaveLength(0);
       expect(context.outbox.pendingEnrichment).toHaveLength(0);
       expect(context.broker.published).toHaveLength(0);

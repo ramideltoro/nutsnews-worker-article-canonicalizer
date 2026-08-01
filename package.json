@@ -43,6 +43,11 @@
     "@ramideltoro/nutsnews-worker-runtime": "0.5.0",
     "amqplib": "^2.0.1"
   },
+  "overrides": {
+    "@ramideltoro/nutsnews-worker-runtime": {
+      "@ramideltoro/nutsnews-worker-contracts": "0.4.0"
+    }
+  },
   "devDependencies": {
     "@eslint/js": "^9.32.0",
     "@types/amqplib": "^0.10.8",

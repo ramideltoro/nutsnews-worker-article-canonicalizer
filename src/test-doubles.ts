@@ -533,6 +533,7 @@ export function createLocalCanonicalizerDependencies(options: LocalCanonicalizer
   const clock = options.clock ?? new ManualCanonicalizerClock();
 
   return {
+    adapterMode: "test",
     clock,
     stateStore: options.stateStore ?? new InMemoryCanonicalStateStore(clock),
     transactionRunner: options.transactionRunner ?? new LocalCanonicalTransactionRunner(),

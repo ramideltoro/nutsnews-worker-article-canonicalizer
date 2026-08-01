@@ -3,8 +3,7 @@ import { timingSafeEqual } from "node:crypto";
 import type { AddressInfo } from "node:net";
 
 import {
-  runtimeHealthEndpointResponse,
-  type PrometheusRuntimeTelemetrySink
+  runtimeHealthEndpointResponse
 } from "@ramideltoro/nutsnews-worker-runtime";
 
 import {
@@ -16,12 +15,13 @@ import {
   type CanonicalizerReconciliationRequest,
   type CanonicalizerReconciler
 } from "./reconciliation.js";
+import type { CanonicalizationMetricsSink } from "./metrics.js";
 import type { CanonicalizerService } from "./service.js";
 
 export interface CanonicalizerHttpServerOptions {
   readonly config: CanonicalizerConfig;
   readonly service: CanonicalizerService;
-  readonly metrics?: PrometheusRuntimeTelemetrySink;
+  readonly metrics?: CanonicalizationMetricsSink;
   readonly reconciler?: CanonicalizerReconciler;
   readonly reconciliationToken?: string;
 }
@@ -90,6 +90,7 @@ async function routeRequest(
 
   switch (url.pathname) {
     case "/live":
+    case "/livez":
     case "/healthz":
       writeHealth(response, await options.service.health.liveness());
       return;

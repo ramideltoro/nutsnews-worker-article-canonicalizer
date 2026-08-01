@@ -30,6 +30,7 @@ import {
   stableEnrichmentRequestId,
   stableUuid
 } from "./ids.js";
+import { createBestEffortRuntimeTelemetrySink } from "./telemetry.js";
 import { normalizeArticleUrl } from "./url-normalization.js";
 
 export interface CanonicalizationWorkHandlerOptions {
@@ -41,16 +42,19 @@ export interface CanonicalizationWorkHandlerOptions {
 const CANONICALIZATION_QUEUE = "nutsnews.worker.canonicalization.v1";
 
 export function createCanonicalizationWorkHandler(options: CanonicalizationWorkHandlerOptions): CanonicalizerWorkHandler {
+  const telemetry = createBestEffortRuntimeTelemetrySink(options.telemetry);
+
   return {
     name: "canonicalization-work-handler",
-    handle: (context, tools) => handleCanonicalization(context, tools, options)
+    handle: (context, tools) => handleCanonicalization(context, tools, options, telemetry)
   };
 }
 
 async function handleCanonicalization(
   context: RuntimeMessageContext,
   tools: CanonicalizerWorkTools,
-  options: CanonicalizationWorkHandlerOptions
+  options: CanonicalizationWorkHandlerOptions,
+  telemetry: RuntimeTelemetrySink
 ) {
   const candidate = canonicalCandidateFromContext(context);
   const normalized = normalizeArticleUrl(candidate.canonicalUrl);
@@ -68,7 +72,7 @@ async function handleCanonicalization(
       ],
       decidedAt
     });
-    await emitDecisionTelemetry(options, candidate, "invalid", [
+    await emitDecisionTelemetry(telemetry, candidate, "invalid", [
       normalized.reason
     ], decidedAt);
 
@@ -106,7 +110,7 @@ async function handleCanonicalization(
     await tools.recordOutbox(command, receipt);
   }
 
-  await emitDecisionTelemetry(options, candidate, decision.decision, decision.reasons, decidedAt, {
+  await emitDecisionTelemetry(telemetry, candidate, decision.decision, decision.reasons, decidedAt, {
     canonicalArticleId: decision.canonicalArticleId,
     articleVersion: decision.articleVersion
   });
@@ -270,14 +274,14 @@ function enrichmentPublishPayload(
 }
 
 async function emitDecisionTelemetry(
-  options: CanonicalizationWorkHandlerOptions,
+  telemetry: RuntimeTelemetrySink,
   candidate: ReturnType<typeof canonicalCandidateFromContext>,
   decision: string,
   reasons: readonly string[],
   at: string,
   extras: Readonly<Record<string, string | number>> = {}
 ): Promise<void> {
-  await emitRuntimeTelemetry(options.telemetry, {
+  await emitRuntimeTelemetry(telemetry, {
     name: "runtime.dependency.observed",
     level: decision === "invalid" || decision === "ambiguous" ? "warn" : "info",
     at,
