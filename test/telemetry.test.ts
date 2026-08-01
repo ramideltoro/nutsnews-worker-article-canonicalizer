@@ -55,7 +55,8 @@ describe("canonicalization lifecycle telemetry", () => {
       "duplicate",
       "invalid",
       "retry",
-      "dlq"
+      "dlq",
+      "failure"
     ]) {
       expect(metricValue(beforeTraffic, "nutsnews_worker_uplift_stage_events_total", outcome)).toBe(0);
     }
@@ -73,7 +74,7 @@ describe("canonicalization lifecycle telemetry", () => {
     expect(sampleValue(beforeTraffic, "nutsnews_worker_uplift_stage_latency_seconds_count")).toBe(0);
 
     const initialSeries = canonicalStageSeries(beforeTraffic);
-    expect(initialSeries).toHaveLength(21);
+    expect(initialSeries).toHaveLength(22);
 
     await context.metrics.emit({
       name: "runtime.message.accepted",
@@ -219,6 +220,7 @@ describe("canonicalization lifecycle telemetry", () => {
     expect(metricValue(output, "nutsnews_worker_uplift_stage_events_total", "invalid")).toBe(1);
     expect(metricValue(output, "nutsnews_worker_uplift_stage_events_total", "retry")).toBe(1);
     expect(metricValue(output, "nutsnews_worker_uplift_stage_events_total", "dlq")).toBe(2);
+    expect(metricValue(output, "nutsnews_worker_uplift_stage_events_total", "failure")).toBe(0);
     expect(sampleValue(output, "nutsnews_worker_uplift_stage_latency_seconds_bucket", {
       le: "0.01"
     })).toBe(2);

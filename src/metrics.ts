@@ -32,7 +32,8 @@ export const CANONICALIZATION_STAGE_OUTCOMES = [
   "duplicate",
   "invalid",
   "retry",
-  "dlq"
+  "dlq",
+  "failure"
 ] as const;
 
 export type CanonicalizationStageOutcome = (typeof CANONICALIZATION_STAGE_OUTCOMES)[number];

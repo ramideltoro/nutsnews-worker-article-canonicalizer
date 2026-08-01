@@ -110,6 +110,7 @@ describe("canonicalizer HTTP endpoints", () => {
     const metricsBody = await metricsResponse.text();
     expect(metricsBody).toContain("nutsnews_worker_messages_total");
     expect(metricsBody).toContain('nutsnews_worker_uplift_stage_events_total{environment="local",service="canonicalization",outcome="success"} 1');
+    expect(metricsBody).toContain('nutsnews_worker_uplift_stage_events_total{environment="local",service="canonicalization",outcome="failure"} 0');
     expect(metricsBody).toContain('nutsnews_worker_uplift_stage_latency_seconds_bucket{environment="local",service="canonicalization",le="30"} 1');
     expect(metricsBody).toContain('nutsnews_worker_build_info{environment="local",service="nutsnews-worker-article-canonicalizer",version="0.1.0",revision="test-revision"} 1');
     expect(metricsBody).toContain('nutsnews_worker_deployment_info{environment="local",service="nutsnews-worker-article-canonicalizer",deployment="shadow",adapter="in_memory"} 1');
