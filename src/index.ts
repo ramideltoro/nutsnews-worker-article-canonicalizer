@@ -99,6 +99,7 @@ export {
   type CanonicalizerReconciler
 } from "./reconciliation.js";
 export {
+  CANONICALIZER_IDEMPOTENCY_LEASE_MS,
   InMemoryCanonicalStateStore,
   LocalBrokerTransport,
   LocalCanonicalBrokerOutbox,
@@ -246,7 +247,7 @@ function reconciliationTokenFromEnv(): string | undefined {
   return token === undefined || token.length === 0 ? undefined : token;
 }
 
-export const SUPPORTED_RUNTIME_PACKAGE_VERSION = "0.5.0";
+export const SUPPORTED_RUNTIME_PACKAGE_VERSION = "1.0.0";
 
 function assertPackageCompatibility(): void {
   const contracts = getContractPackageMetadata();
@@ -254,7 +255,7 @@ function assertPackageCompatibility(): void {
   const contractsVersion: string = contracts.packageVersion;
   const runtimeVersion: string = runtime.packageVersion;
 
-  if (contractsVersion !== "0.4.0") {
+  if (contractsVersion !== "1.0.0") {
     throw new Error(`Unsupported contracts package version ${contractsVersion}.`);
   }
 

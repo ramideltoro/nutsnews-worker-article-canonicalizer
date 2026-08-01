@@ -37,7 +37,7 @@ The reliability suite covers retry behavior around these crash points:
 - before pending outbox insert, proving staged canonical state is rolled back;
 - after pending outbox insert and before ack, proving replay does not create duplicate enrichment work.
 
-The broker publish-confirm path is exercised with `@ramideltoro/nutsnews-worker-contracts@0.4.0`. New and changed decisions publish one contracted `enrichmentRequest` command after the transaction commits, record the publish receipt in the outbox interface, and replay as duplicate without publishing a second command.
+The broker publish-confirm path is exercised with `@ramideltoro/nutsnews-worker-contracts@1.0.0`. New and changed decisions publish one contracted `enrichmentRequest` command after the transaction commits, record the publish receipt in the outbox interface, and replay as duplicate without publishing a second command. Runtime 1.0 conformance also covers lost claim responses, completion rejection before and after commit, stale-token release, completed-record preservation, and lease expiry/reclaim. The current process-clock store is a test double, not production lease evidence. Production admission additionally requires server-authoritative time and a finish/renew/fail-closed policy for work that can approach the 300-second lease bound; until a durable adapter provides that, mixed-mode startup remains unready and registers no consumer.
 
 ## Ambiguity Review
 

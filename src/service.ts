@@ -316,6 +316,10 @@ function classifyStateStoreFailures(store: RuntimeIdempotencyStore): RuntimeIdem
     markFailed: async (idempotencyKey, failure) => stateStoreOperation(
       "idempotency-failure-record-error",
       () => store.markFailed(idempotencyKey, failure)
+    ),
+    releaseClaim: async (idempotencyKey, failure) => stateStoreOperation(
+      "idempotency-release-error",
+      () => store.releaseClaim(idempotencyKey, failure)
     )
   };
 }

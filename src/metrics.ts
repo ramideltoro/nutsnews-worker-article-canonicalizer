@@ -93,7 +93,7 @@ export function createCanonicalizationPrometheusTelemetrySink(
     ...(options.defaultQueue === undefined ? {} : {
       defaultQueue: options.defaultQueue
     })
-  } as PrometheusRuntimeTelemetrySinkOptions);
+  });
   const environment = metricLabelValue(options.identity.environment);
   const counters = new Map<CanonicalizationStageOutcome, number>(
     CANONICALIZATION_STAGE_OUTCOMES.map((outcome) => [
@@ -125,8 +125,8 @@ export function createCanonicalizationPrometheusTelemetrySink(
     allowedLabels: runtime.allowedLabels,
     async emit(event: RuntimeTelemetryEvent): Promise<void> {
       // This wrapper owns the bounded health-probe family, so forwarding health
-      // events to Runtime1 would expose duplicate metadata and samples. Runtime
-      // 0.5 also records a zero-duration dependency sample without a measurement.
+      // events to Runtime 1 would expose duplicate metadata and samples. Keep an
+      // unmeasured dependency event out of the runtime histogram as well.
       if (
         event.name !== "runtime.health.evaluated"
         && (event.name !== "runtime.dependency.observed" || measuredDuration(event) !== undefined)

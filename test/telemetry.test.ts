@@ -183,7 +183,7 @@ describe("canonicalization lifecycle telemetry", () => {
     });
     expect(completed[2]).toMatchObject({
       name: "runtime.message.invalid",
-      outcome: "failure",
+      outcome: "invalid",
       attributes: {
         issueCode: "stage-mismatch",
         issuePath: "$.route"
