@@ -1,8 +1,13 @@
 import {
+  assertWorkerEnvelope
+} from "@ramideltoro/nutsnews-worker-contracts";
+import {
   createBufferedRuntimeTelemetrySink,
   type RuntimeIdempotencyClaimContext,
+  type RuntimeIdempotencyClaimReleaseResult,
   type RuntimeIdempotencyClaimResult,
-  type RuntimeIdempotencyCompletion
+  type RuntimeIdempotencyCompletion,
+  type RuntimeIdempotencyFailure
 } from "@ramideltoro/nutsnews-worker-runtime";
 import {
   describe,
@@ -15,6 +20,7 @@ import { loadCanonicalizerConfig } from "../src/config.js";
 import { buildCanonicalReplayReport } from "../src/replay-report.js";
 import { createCanonicalizerService } from "../src/service.js";
 import {
+  CANONICALIZER_IDEMPOTENCY_LEASE_MS,
   InMemoryCanonicalStateStore,
   LocalBrokerTransport,
   LocalCanonicalBrokerOutbox,
@@ -136,7 +142,10 @@ describe("canonicalization reliability proof", () => {
     await context.service.start();
 
     try {
-      await expect(context.broker.deliverCanonicalization(delivery)).rejects.toThrow("crash-before-inbox-insert");
+      await expect(context.broker.deliverCanonicalization(delivery)).resolves.toMatchObject({
+        action: "retry",
+        reason: "idempotency-claim-error"
+      });
       expect(context.stateStore.decisions).toHaveLength(0);
       expect(context.outbox.pendingEnrichment).toHaveLength(0);
       expect(context.broker.published).toHaveLength(0);
@@ -150,6 +159,45 @@ describe("canonicalization reliability proof", () => {
       ]);
       expect(context.outbox.pendingEnrichment).toHaveLength(1);
       expect(context.broker.published).toHaveLength(1);
+    } finally {
+      await context.service.stop();
+    }
+  });
+
+  it("does not release an ambiguously committed claim and reclaims it only after lease expiry", async () => {
+    const clock = new ManualCanonicalizerClock();
+    const stateStore = new ClaimCommitThenRejectStateStore(clock);
+    const context = createReliabilityContext({
+      clock,
+      stateStore
+    });
+    const delivery = articleDelivery(1, {
+      candidateId: "candidate-lost-claim-response",
+      canonicalUrl: "https://articles.example.test/crash/lost-claim-response"
+    });
+
+    await context.service.start();
+
+    try {
+      await expect(context.broker.deliverCanonicalization(delivery)).resolves.toMatchObject({
+        action: "retry",
+        reason: "idempotency-claim-error"
+      });
+      await expect(context.broker.deliverCanonicalization(delivery)).resolves.toMatchObject({
+        action: "retry",
+        reason: "idempotency-in-progress"
+      });
+      expect(stateStore.releaseCalls).toBe(0);
+      expect(context.stateStore.decisions).toHaveLength(0);
+
+      clock.advance(CANONICALIZER_IDEMPOTENCY_LEASE_MS);
+      await expect(context.broker.deliverCanonicalization(delivery)).resolves.toMatchObject({
+        action: "ack",
+        reason: "handled"
+      });
+      expect(context.stateStore.decisions.map((decision) => decision.decision)).toEqual([
+        "new"
+      ]);
     } finally {
       await context.service.stop();
     }
@@ -229,7 +277,7 @@ describe("canonicalization reliability proof", () => {
 
   it("does not duplicate enrichment after a crash after outbox insert and before ack", async () => {
     const clock = new ManualCanonicalizerClock();
-    const stateStore = new CompletionCrashStateStore(clock);
+    const stateStore = new CompletionRejectBeforeCommitStateStore(clock);
     const context = createReliabilityContext({
       clock,
       stateStore
@@ -244,8 +292,9 @@ describe("canonicalization reliability proof", () => {
     try {
       await expect(context.broker.deliverCanonicalization(delivery)).resolves.toMatchObject({
         action: "retry",
-        reason: "handler-error"
+        reason: "idempotency-completion-error"
       });
+      expect(stateStore.releaseCalls).toBe(1);
       expect(context.stateStore.decisions.map((decision) => decision.decision)).toEqual([
         "new"
       ]);
@@ -257,6 +306,7 @@ describe("canonicalization reliability proof", () => {
         action: "ack",
         reason: "handled"
       });
+      expect(stateStore.releaseCalls).toBe(1);
       expect(context.stateStore.decisions.map((decision) => decision.decision)).toEqual([
         "new",
         "duplicate"
@@ -267,6 +317,53 @@ describe("canonicalization reliability proof", () => {
       expect(context.outbox.pendingEnrichment).toHaveLength(1);
       expect(context.broker.published).toHaveLength(1);
       expect(context.outbox.records).toHaveLength(1);
+    } finally {
+      await context.service.stop();
+    }
+  });
+
+  it("acks final-attempt work when completion commits before its response is lost", async () => {
+    const clock = new ManualCanonicalizerClock();
+    const stateStore = new CompletionCommitThenRejectStateStore(clock);
+    const context = createReliabilityContext({
+      clock,
+      stateStore
+    });
+    const baseDelivery = articleDelivery(1, {
+      candidateId: "candidate-completion-commit-response-lost",
+      canonicalUrl: "https://articles.example.test/crash/completion-commit-response-lost"
+    });
+    const baseEnvelope = assertWorkerEnvelope(baseDelivery.envelope);
+    const delivery = {
+      ...baseDelivery,
+      envelope: {
+        ...baseEnvelope,
+        attempt: {
+          ...baseEnvelope.attempt,
+          count: baseEnvelope.attempt.max
+        }
+      }
+    };
+
+    await context.service.start();
+
+    try {
+      await expect(context.broker.deliverCanonicalization(delivery)).resolves.toMatchObject({
+        action: "ack",
+        reason: "handled"
+      });
+      expect(stateStore.releaseCalls).toBe(1);
+      expect(context.stateStore.decisions.map((decision) => decision.decision)).toEqual([
+        "new"
+      ]);
+      expect(context.outbox.pendingEnrichment).toHaveLength(1);
+      expect(context.broker.published).toHaveLength(1);
+      await expect(context.broker.deliverCanonicalization(delivery)).resolves.toMatchObject({
+        action: "ack",
+        reason: "duplicate"
+      });
+      expect(context.stateStore.decisions).toHaveLength(1);
+      expect(context.broker.published).toHaveLength(1);
     } finally {
       await context.service.stop();
     }
@@ -497,6 +594,33 @@ class ClaimCrashStateStore extends InMemoryCanonicalStateStore {
   }
 }
 
+class ClaimCommitThenRejectStateStore extends InMemoryCanonicalStateStore {
+  private rejectNextClaimResponse = true;
+  releaseCalls = 0;
+
+  override async claim(
+    idempotencyKey: string,
+    context: RuntimeIdempotencyClaimContext
+  ): Promise<RuntimeIdempotencyClaimResult> {
+    const result = await super.claim(idempotencyKey, context);
+
+    if (this.rejectNextClaimResponse) {
+      this.rejectNextClaimResponse = false;
+      throw new Error("claim-committed-response-lost");
+    }
+
+    return result;
+  }
+
+  override releaseClaim(
+    idempotencyKey: string,
+    failure: RuntimeIdempotencyFailure
+  ): Promise<RuntimeIdempotencyClaimReleaseResult> {
+    this.releaseCalls += 1;
+    return super.releaseClaim(idempotencyKey, failure);
+  }
+}
+
 class ResolveCrashStateStore extends InMemoryCanonicalStateStore {
   private crashNextResolve = true;
 
@@ -523,8 +647,9 @@ class PendingOutboxCrash extends LocalCanonicalBrokerOutbox {
   }
 }
 
-class CompletionCrashStateStore extends InMemoryCanonicalStateStore {
+class CompletionRejectBeforeCommitStateStore extends InMemoryCanonicalStateStore {
   private crashNextCompletion = true;
+  releaseCalls = 0;
 
   override markCompleted(idempotencyKey: string, completion: RuntimeIdempotencyCompletion): Promise<void> {
     if (this.crashNextCompletion) {
@@ -533,5 +658,38 @@ class CompletionCrashStateStore extends InMemoryCanonicalStateStore {
     }
 
     return super.markCompleted(idempotencyKey, completion);
+  }
+
+  override releaseClaim(
+    idempotencyKey: string,
+    failure: RuntimeIdempotencyFailure
+  ): Promise<RuntimeIdempotencyClaimReleaseResult> {
+    this.releaseCalls += 1;
+    return super.releaseClaim(idempotencyKey, failure);
+  }
+}
+
+class CompletionCommitThenRejectStateStore extends InMemoryCanonicalStateStore {
+  private rejectNextCompletionResponse = true;
+  releaseCalls = 0;
+
+  override async markCompleted(
+    idempotencyKey: string,
+    completion: RuntimeIdempotencyCompletion
+  ): Promise<void> {
+    await super.markCompleted(idempotencyKey, completion);
+
+    if (this.rejectNextCompletionResponse) {
+      this.rejectNextCompletionResponse = false;
+      throw new Error("completion-committed-response-lost");
+    }
+  }
+
+  override releaseClaim(
+    idempotencyKey: string,
+    failure: RuntimeIdempotencyFailure
+  ): Promise<RuntimeIdempotencyClaimReleaseResult> {
+    this.releaseCalls += 1;
+    return super.releaseClaim(idempotencyKey, failure);
   }
 }

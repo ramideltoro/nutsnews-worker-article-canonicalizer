@@ -6,24 +6,32 @@ The article canonicalizer owns the worker-uplift service boundary that consumes 
 
 ## Runtime Surfaces
 
-- Contracts: `@ramideltoro/nutsnews-worker-contracts@0.4.0`
-- Runtime: `@ramideltoro/nutsnews-worker-runtime@0.5.0`
+- Contracts: `@ramideltoro/nutsnews-worker-contracts@1.0.0`
+- Runtime: `@ramideltoro/nutsnews-worker-runtime@1.0.0`
 - Input route boundary: `getWorkerRoute("canonicalization")`
 - Downstream publish route boundary: `getWorkerRoute("enrichment")`
-- Health: separate liveness, startup, and readiness probes; readiness requires an active `canonicalization` main-queue consumer
-- Metrics: bounded Prometheus text from the shared runtime sink
-- Shutdown: stop accepting deliveries, wait for in-flight handlers, cancel consumers, close broker lifecycle
+- Health: separate liveness, startup, and readiness probes; container health uses liveness, while readiness reflects configured-role usability through the active `canonicalization` main-queue consumer and required dependency adapters
+- Metrics: bounded Prometheus text from the shared runtime sink plus immutable build/deployment/adapter identity, canonical stage lifecycle counters, fixed-bucket seconds latency, distinct probe state, and a shadow ownership gauge
+- Startup: bind HTTP first, expose unhealthy startup/readiness while dependencies initialize, and fail within the configured startup timeout
+- Shutdown: stop accepting deliveries, wait for in-flight handlers, cancel consumers, close broker lifecycle; telemetry emission and raw-log flushing remain non-authoritative
 
 ## Shell Flow
 
 1. Validate value-free configuration and secret presence by variable name.
 2. Assert exact contracts/runtime package versions.
-3. Start the shared broker lifecycle and assert canonicalization/enrichment topology.
-4. Register a `canonicalization` consumer through the shared runtime message processor.
-5. Validate incoming envelopes and canonicalization payloads before delegated work.
-6. Claim the durable idempotency interface before delegating to the injected handler.
-7. Expose canonical state, database transaction, and broker outbox tools to the handler.
-8. Drain in-flight handlers before broker shutdown.
+3. Bind the HTTP observability surface before dependency initialization.
+4. Start the shared broker lifecycle within the configured startup deadline and assert canonicalization/enrichment topology.
+5. Register a `canonicalization` consumer through the shared runtime message processor only when the full production adapter bundle is available; the current shadow backend composition deliberately stops before this step.
+6. Validate incoming envelopes and canonicalization payloads before delegated work.
+7. Claim the durable idempotency interface before delegating to the injected handler.
+8. Expose canonical state, database transaction, and broker outbox tools to the handler.
+9. Drain in-flight handlers before broker shutdown.
+
+Every delivery produces one `runtime.message.started` event and exactly one completing event (`accepted`, `duplicate`, `invalid`, `retry`, or `dlq`). Runtime 1.0 converts idempotency claim and state-record failures into one retry or exhausted-attempt DLQ outcome. Successful claims return opaque ownership tokens; completion, failure, and conditional release use compare-and-set transitions, and completed records cannot be downgraded. The service-local conformance store reclaims abandoned in-progress claims only after its bounded five-minute lease. Its injected process clock exists for deterministic tests and is not a production authority. A future production adapter must compute expiry and atomic reclaim from authoritative database or state-server time, cap leases at 300 seconds, and require long-running work to finish, renew ownership, or fail closed before reclaim; it must pass the same conformance suite before declaring `adapterMode: "production"`. Composite telemetry destinations are isolated from one another, and both the processor and real canonicalization handler treat telemetry as best effort so post-side-effect emission failures cannot change delivery disposition. The metrics wrapper derives `nutsnews_worker_uplift_stage_events_total` and `nutsnews_worker_uplift_stage_latency_seconds` from only those completing events. It seeds the shared bounded `success`, `duplicate`, `invalid`, `retry`, `dlq`, and `failure` outcome series on the first scrape; canonicalizer terminal failures remain classified by the more specific retry or DLQ disposition. Its fixed bucket boundaries are `0.005`, `0.01`, `0.025`, `0.05`, `0.1`, `0.25`, `0.5`, `1`, `2.5`, `5`, `10`, `30`, `60`, `120`, and `300` seconds plus `+Inf`. The only labels on those series are bounded environment, service, outcome, and histogram boundary values, with `service="canonicalizer"` used consistently; delivery identifiers remain structured metadata.
+
+Runtime solely owns `nutsnews_worker_expected_active`, fixed to `0` while this service remains shadow-only, and uses it only to gate production paging and cutover ownership. Accepted and duplicate deliveries monotonically advance Runtime's last-success timestamp. Readiness is independent of ownership and reports whether the configured shadow role, consumer, and required dependencies are usable. `nutsnews_worker_build_info`, `nutsnews_worker_deployment_info`, and structured logs expose the immutable revision, shadow deployment, and bounded adapter mode; scrape freshness comes from Prometheus scrape timestamps. The service owns one non-duplicated `nutsnews_worker_health_probe` family for immediate lifecycle transitions, while forwarded Runtime health events own bounded per-check gauges and duration histograms. Consumer cancellation or channel loss immediately marks readiness unhealthy and invokes the real readiness check set, keeping Runtime's `rabbitmq-consumer` gauge current without a fabricated synthetic duration. Unmeasured dependency observations are excluded rather than recorded as zero latency.
+
+Dependency bundles declare an explicit `adapterMode`. Configuration rejects `NUTSNEWS_ENVIRONMENT=production` unless dependency mode is also `production`, and production dependency mode requires an exact lowercase 40-character Git commit SHA while local/test revisions retain their bounded descriptive format. A defensive readiness/consumer guard repeats the environment/mode invariant and requires `adapterMode="production"`. The current backend production process reports `mixed`: its RabbitMQ transport is real, while canonical state, transactions, and outbox are local test implementations. It may connect and assert broker topology so liveness and metrics remain inspectable, but it never registers the canonicalization consumer and can never report ready. This prevents real RabbitMQ deliveries from being acknowledged against ephemeral state.
 
 The handler remains value-free: it never stores article bodies, AI output, credentials, or production secret values. It does not fetch article pages, call AI providers, approve content, translate content, persist backend article rows, or publish user-facing articles.
 
@@ -60,6 +68,6 @@ Local doubles back tests and health probes without production dependencies. Back
 
 ## Safety Bounds
 
-`NUTSNEWS_CANONICALIZER_CONCURRENCY` caps concurrent canonicalization handlers. `NUTSNEWS_CANONICALIZER_PREFETCH` must be greater than or equal to concurrency.
+`NUTSNEWS_CANONICALIZER_CONCURRENCY` caps concurrent canonicalization handlers. `NUTSNEWS_CANONICALIZER_PREFETCH` must be greater than or equal to concurrency. `NUTSNEWS_CANONICALIZER_STARTUP_TIMEOUT_MS` bounds dependency startup while the HTTP probes report startup/readiness as unhealthy.
 
 `NUTSNEWS_CANONICALIZER_SHADOW_MODE` remains required so bootstrap deployment cannot become the production legacy ingestion path by accident.

@@ -51,6 +51,7 @@ export interface CanonicalizerWorkHandler {
 }
 
 export interface CanonicalizerDependencies {
+  readonly adapterMode: "test" | "mixed" | "production";
   readonly clock: RuntimeClock;
   readonly stateStore: CanonicalStateStore;
   readonly transactionRunner: CanonicalDatabaseTransactionRunner;

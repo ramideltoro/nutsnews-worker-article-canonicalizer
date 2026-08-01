@@ -28,7 +28,8 @@ import {
   type ChannelModel,
   type ConfirmChannel,
   type ConsumeMessage,
-  type Options
+  type Options,
+  type SocketOptions
 } from "amqplib";
 
 const DEFAULT_CONFIRM_TIMEOUT_MS = WORKER_DELIVERY_BEHAVIOR.confirmTimeoutMs;
@@ -45,13 +46,17 @@ interface PayloadConsumerRegistration {
   consumerTag: string | undefined;
 }
 
-type RabbitMqConnect = (url: string) => Promise<ChannelModel>;
+type RabbitMqConnect = (
+  url: string,
+  socketOptions: Pick<SocketOptions, "timeout">
+) => Promise<ChannelModel>;
 
 export class PayloadRabbitMqTransport implements RuntimeBrokerTransport {
   readonly name = "rabbitmq-payload-transport";
 
   private readonly url: string;
   private readonly prefetchCount: number;
+  private readonly connectTimeoutMs: number;
   private readonly clock: RuntimeClock;
   private readonly telemetry: RuntimeTelemetrySink | undefined;
   private readonly connectToBroker: RabbitMqConnect;
@@ -67,12 +72,14 @@ export class PayloadRabbitMqTransport implements RuntimeBrokerTransport {
   constructor(options: {
     readonly url: string;
     readonly prefetch: number;
+    readonly connectTimeoutMs: number;
     readonly clock: RuntimeClock;
     readonly telemetry?: RuntimeTelemetrySink;
     readonly connect?: RabbitMqConnect;
   }) {
     this.url = options.url;
     this.prefetchCount = options.prefetch;
+    this.connectTimeoutMs = options.connectTimeoutMs;
     this.clock = options.clock;
     this.telemetry = options.telemetry;
     this.connectToBroker = options.connect ?? amqpConnect;
@@ -209,9 +216,33 @@ export class PayloadRabbitMqTransport implements RuntimeBrokerTransport {
       throw new Error("RabbitMQ payload transport is closing.");
     }
 
-    const connection = await this.connectToBroker(this.url);
-    const channel = await connection.createConfirmChannel();
+    const connection = await this.connectToBroker(this.url, {
+      timeout: this.connectTimeoutMs
+    });
+
+    if (this.isClosing()) {
+      await connection.close().catch(() => undefined);
+      throw new Error("RabbitMQ payload transport is closing.");
+    }
+
     this.connection = connection;
+    let channel: ConfirmChannel;
+
+    try {
+      channel = await connection.createConfirmChannel();
+
+      if (this.isClosing()) {
+        throw new Error("RabbitMQ payload transport is closing.");
+      }
+    } catch (error: unknown) {
+      if (this.connection === connection) {
+        this.connection = undefined;
+      }
+
+      await connection.close().catch(() => undefined);
+      throw error;
+    }
+
     this.channel = channel;
 
     connection.on("close", () => {
@@ -242,6 +273,10 @@ export class PayloadRabbitMqTransport implements RuntimeBrokerTransport {
     await this.restoreConsumers(channel);
 
     return channel;
+  }
+
+  private isClosing(): boolean {
+    return this.closing;
   }
 
   private async restoreConsumers(channel: ConfirmChannel): Promise<void> {

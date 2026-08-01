@@ -10,7 +10,8 @@ import {
 import {
   describe,
   expect,
-  it
+  it,
+  vi
 } from "vitest";
 
 import { createCanonicalizationWorkHandler } from "../src/canonicalization.js";
@@ -111,6 +112,75 @@ describe("createCanonicalizationWorkHandler", () => {
     } finally {
       await context.service.stop();
     }
+  });
+
+  it("acks completed business side effects when decision telemetry rejects", async () => {
+    const config = loadCanonicalizerConfig({
+      NUTSNEWS_CANONICALIZER_HTTP_PORT: "0",
+      NUTSNEWS_CANONICALIZER_TELEMETRY_LOGS: "silent"
+    });
+    const baseDependencies = createLocalCanonicalizerDependencies();
+    const rejectingTelemetry = {
+      emit: vi.fn(() => Promise.reject(new Error("telemetry unavailable")))
+    };
+    const dependencies = {
+      ...baseDependencies,
+      workHandler: createCanonicalizationWorkHandler({
+        config,
+        dependencies: baseDependencies,
+        telemetry: rejectingTelemetry
+      })
+    };
+    const service = createCanonicalizerService({
+      config,
+      dependencies
+    });
+    const broker = dependencies.brokerTransport as LocalBrokerTransport;
+    const outbox = dependencies.brokerOutbox as LocalCanonicalBrokerOutbox;
+    const stateStore = dependencies.stateStore as InMemoryCanonicalStateStore;
+
+    await service.start();
+
+    try {
+      await expect(broker.deliverCanonicalization(articleDelivery(99))).resolves.toMatchObject({
+        action: "ack",
+        reason: "handled"
+      });
+      expect(rejectingTelemetry.emit).toHaveBeenCalledOnce();
+      expect(stateStore.decisions).toHaveLength(1);
+      expect(outbox.pendingEnrichment).toHaveLength(1);
+      expect(broker.published).toHaveLength(1);
+      expect(outbox.records).toHaveLength(1);
+    } finally {
+      await service.stop();
+    }
+  });
+
+  it("continues to surface business dependency failures when telemetry is best effort", async () => {
+    const config = loadCanonicalizerConfig({
+      NUTSNEWS_CANONICALIZER_HTTP_PORT: "0",
+      NUTSNEWS_CANONICALIZER_TELEMETRY_LOGS: "silent"
+    });
+    const dependencies = createLocalCanonicalizerDependencies();
+    const businessFailure = new Error("canonical state unavailable");
+    vi.spyOn(dependencies.stateStore, "resolveCandidate").mockRejectedValueOnce(businessFailure);
+    const rejectingTelemetry = {
+      emit: vi.fn(() => Promise.reject(new Error("telemetry unavailable")))
+    };
+    const handler = createCanonicalizationWorkHandler({
+      config,
+      dependencies,
+      telemetry: rejectingTelemetry
+    });
+    const context = {
+      envelope: createMinimalCanonicalizationEnvelope(),
+      payload: createMinimalCanonicalizationPayload(),
+      stage: "canonicalization",
+      receivedAt: "2026-07-23T00:00:01.000Z"
+    } satisfies RuntimeMessageContext;
+
+    await expect(handler.handle(context, createWorkTools(dependencies))).rejects.toBe(businessFailure);
+    expect(rejectingTelemetry.emit).not.toHaveBeenCalled();
   });
 
   it("resolves the same article across feeds and retries to one canonical ID", async () => {

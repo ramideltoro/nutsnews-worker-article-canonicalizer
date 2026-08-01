@@ -9,7 +9,6 @@ import {
   type WorkerStage
 } from "@ramideltoro/nutsnews-worker-contracts";
 import {
-  createInMemoryIdempotencyStore,
   type BrokerConsumerHandle,
   type BrokerDeliveryHandler,
   type BrokerPublishCommand,
@@ -18,6 +17,7 @@ import {
   type RuntimeClock,
   type RuntimeHandlerResult,
   type RuntimeIdempotencyClaimContext,
+  type RuntimeIdempotencyClaimReleaseResult,
   type RuntimeIdempotencyClaimResult,
   type RuntimeIdempotencyCompletion,
   type RuntimeIdempotencyFailure,
@@ -50,6 +50,157 @@ interface CanonicalArticleRecord {
   materialFingerprint: string;
 }
 
+export const CANONICALIZER_IDEMPOTENCY_LEASE_MS = 300_000;
+
+type CanonicalizerIdempotencyEntry =
+  | {
+      readonly status: "in-progress";
+      readonly firstSeenAt: string;
+      readonly claimToken: string;
+      readonly leaseExpiresAtMs: number;
+    }
+  | {
+      readonly status: "completed";
+      readonly firstSeenAt: string;
+      readonly completion: RuntimeIdempotencyCompletion;
+    }
+  | {
+      readonly status: "failed";
+      readonly firstSeenAt: string;
+      readonly failure: RuntimeIdempotencyFailure;
+    };
+
+class LeasedCanonicalizerIdempotencyStore {
+  private readonly records = new Map<string, CanonicalizerIdempotencyEntry>();
+  private claimSequence = 0;
+
+  constructor(
+    private readonly clock: RuntimeClock,
+    readonly leaseMs: number
+  ) {
+    if (!Number.isSafeInteger(leaseMs) || leaseMs < 1 || leaseMs > CANONICALIZER_IDEMPOTENCY_LEASE_MS) {
+      throw new Error(`Canonicalizer idempotency lease must be between 1 and ${String(CANONICALIZER_IDEMPOTENCY_LEASE_MS)} milliseconds.`);
+    }
+  }
+
+  claim(idempotencyKey: string, context: RuntimeIdempotencyClaimContext): Promise<RuntimeIdempotencyClaimResult> {
+    const existing = this.records.get(idempotencyKey);
+    const nowMs = this.clock.now().getTime();
+
+    if (
+      existing === undefined
+      || existing.status === "failed"
+      || (existing.status === "in-progress" && existing.leaseExpiresAtMs <= nowMs)
+    ) {
+      const claimToken = this.nextClaimToken(context.envelope.messageId, nowMs);
+      const firstSeenAt = existing?.firstSeenAt ?? context.receivedAt;
+      this.records.set(idempotencyKey, {
+        status: "in-progress",
+        firstSeenAt,
+        claimToken,
+        leaseExpiresAtMs: nowMs + this.leaseMs
+      });
+
+      return Promise.resolve({
+        status: "claimed",
+        firstSeenAt,
+        replay: existing !== undefined,
+        claimToken
+      });
+    }
+
+    if (existing.status === "completed") {
+      return Promise.resolve({
+        status: "already-completed",
+        firstSeenAt: existing.firstSeenAt,
+        completedAt: existing.completion.completedAt,
+        completion: existing.completion
+      });
+    }
+
+    return Promise.resolve({
+      status: "in-progress",
+      firstSeenAt: existing.firstSeenAt
+    });
+  }
+
+  markCompleted(idempotencyKey: string, completion: RuntimeIdempotencyCompletion): Promise<void> {
+    const existing = this.records.get(idempotencyKey);
+
+    if (!this.ownsActiveClaim(existing, completion.claimToken)) {
+      return Promise.reject(new Error("Cannot complete an idempotency claim owned by another delivery."));
+    }
+
+    this.records.set(idempotencyKey, {
+      status: "completed",
+      firstSeenAt: existing.firstSeenAt,
+      completion
+    });
+
+    return Promise.resolve();
+  }
+
+  markFailed(idempotencyKey: string, failure: RuntimeIdempotencyFailure): Promise<void> {
+    const existing = this.records.get(idempotencyKey);
+
+    if (!this.ownsActiveClaim(existing, failure.claimToken)) {
+      return Promise.reject(new Error("Cannot fail an idempotency claim owned by another delivery."));
+    }
+
+    this.records.set(idempotencyKey, {
+      status: "failed",
+      firstSeenAt: existing.firstSeenAt,
+      failure
+    });
+
+    return Promise.resolve();
+  }
+
+  releaseClaim(
+    idempotencyKey: string,
+    failure: RuntimeIdempotencyFailure
+  ): Promise<RuntimeIdempotencyClaimReleaseResult> {
+    const existing = this.records.get(idempotencyKey);
+
+    if (existing?.status === "completed") {
+      return Promise.resolve({
+        status: "preserved-completed"
+      });
+    }
+
+    if (!this.ownsActiveClaim(existing, failure.claimToken)) {
+      return Promise.resolve({
+        status: "not-owned"
+      });
+    }
+
+    this.records.set(idempotencyKey, {
+      status: "failed",
+      firstSeenAt: existing.firstSeenAt,
+      failure
+    });
+
+    return Promise.resolve({
+      status: "released"
+    });
+  }
+
+  private nextClaimToken(messageId: string, nowMs: number): string {
+    this.claimSequence += 1;
+
+    return `${messageId}:${String(nowMs)}:${String(this.claimSequence)}`;
+  }
+
+  private ownsActiveClaim(
+    entry: CanonicalizerIdempotencyEntry | undefined,
+    claimToken: string
+  ): entry is Extract<CanonicalizerIdempotencyEntry, { readonly status: "in-progress" }> {
+    return entry?.status === "in-progress"
+      && entry.claimToken === claimToken
+      && entry.leaseExpiresAtMs > this.clock.now().getTime();
+  }
+}
+
 export class ManualCanonicalizerClock implements RuntimeClock {
   private current: Date;
 
@@ -74,10 +225,13 @@ export class InMemoryCanonicalStateStore implements CanonicalStateStore {
   private readonly urlAliases = new Map<string, string>();
   private readonly sourceAliases = new Map<string, string>();
   private readonly candidateDecisions = new Map<string, CanonicalResolutionDecision>();
-  private readonly store;
+  private readonly store: LeasedCanonicalizerIdempotencyStore;
 
-  constructor(clock: RuntimeClock = new ManualCanonicalizerClock()) {
-    this.store = createInMemoryIdempotencyStore(clock);
+  constructor(
+    clock: RuntimeClock = new ManualCanonicalizerClock(),
+    readonly idempotencyLeaseMs: number = CANONICALIZER_IDEMPOTENCY_LEASE_MS
+  ) {
+    this.store = new LeasedCanonicalizerIdempotencyStore(clock, idempotencyLeaseMs);
   }
 
   probe(): CanonicalizerDependencyProbe {
@@ -97,6 +251,13 @@ export class InMemoryCanonicalStateStore implements CanonicalStateStore {
 
   markFailed(idempotencyKey: string, failure: RuntimeIdempotencyFailure): Promise<void> {
     return this.store.markFailed(idempotencyKey, failure);
+  }
+
+  releaseClaim(
+    idempotencyKey: string,
+    failure: RuntimeIdempotencyFailure
+  ): Promise<RuntimeIdempotencyClaimReleaseResult> {
+    return this.store.releaseClaim(idempotencyKey, failure);
   }
 
   resolveCandidate(input: CanonicalCandidateInput, transaction: CanonicalDatabaseTransaction): Promise<CanonicalResolutionDecision> {
@@ -533,6 +694,7 @@ export function createLocalCanonicalizerDependencies(options: LocalCanonicalizer
   const clock = options.clock ?? new ManualCanonicalizerClock();
 
   return {
+    adapterMode: "test",
     clock,
     stateStore: options.stateStore ?? new InMemoryCanonicalStateStore(clock),
     transactionRunner: options.transactionRunner ?? new LocalCanonicalTransactionRunner(),
